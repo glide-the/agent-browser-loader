@@ -38,16 +38,10 @@
       "source": "github:org/agent-browser-plugin-cloud-browser"
     },
     {
-      "args": [
-        "-y",
-        "agent-browser-plugin-stealth"
-      ],
-      "capabilities": [
-        "launch.mutate"
-      ],
-      "command": "npx",
       "name": "stealth",
-      "source": "npm:agent-browser-plugin-stealth"
+      "command": "node",
+      "args": ["./plugins/agent-browser-plugin-stealth/dist/index.js"],
+      "capabilities": ["launch.mutate"]
     },
     {
       "name": "agent-browser-plugin-userprofile-browser",

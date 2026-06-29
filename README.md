@@ -6,6 +6,160 @@ This workspace contains local plugins for [agent-browser](https://github.com/age
 
 ---
 
+## agent-browser-plugin-stealth
+
+A local `launch.mutate` plugin that appends stealth-related Chrome launch arguments, extensions, initScripts, and a custom userAgent to agent-browser local launches.
+
+### Scope and Limitations
+
+**This plugin only affects local agent-browser `launch`.** It does NOT modify:
+- Browsers started via `--cdp` (CDP connect mode)
+- Browsers started via `--auto-connect`
+- Browsers provided by a `browser.provider` plugin (e.g. cloud-browser, userprofile-browser)
+
+If you need stealth args when using a `browser.provider`, pass them explicitly in the `browser.launch` request `args` field.
+
+### Build
+
+```bash
+cd plugins/agent-browser-plugin-stealth
+bun run build
+```
+
+Produces `dist/index.js`. The plugin is configured in `agent-browser.json`:
+
+```json
+{
+  "name": "stealth",
+  "command": "node",
+  "args": ["./plugins/agent-browser-plugin-stealth/dist/index.js"],
+  "capabilities": ["launch.mutate"]
+}
+```
+
+### Environment Variables
+
+| Variable | Description |
+|---|---|
+| `AGENT_BROWSER_STEALTH_ARGS` | Extra Chrome args to append (comma or newline separated) |
+| `AGENT_BROWSER_STEALTH_EXTENSION` | Single Chrome extension absolute path |
+| `AGENT_BROWSER_STEALTH_EXTENSIONS` | Multiple Chrome extension absolute paths (comma or newline separated) |
+| `AGENT_BROWSER_STEALTH_USER_AGENT` | Override the userAgent string |
+| `AGENT_BROWSER_STEALTH_NO_SANDBOX` | Set to `1` or `true` to add `--no-sandbox` (see Security Risks) |
+
+**Extension paths must be absolute.** Relative paths or non-existent paths produce a warning on stderr; the extension is skipped rather than silently misconfigured.
+
+### Protocol Examples
+
+#### `plugin.manifest`
+
+Request:
+```json
+{
+  "protocol": "agent-browser.plugin.v1",
+  "type": "plugin.manifest",
+  "capability": "plugin.manifest",
+  "request": {}
+}
+```
+
+Response:
+```json
+{
+  "protocol": "agent-browser.plugin.v1",
+  "success": true,
+  "manifest": {
+    "name": "agent-browser-plugin-stealth",
+    "capabilities": ["launch.mutate"],
+    "description": "Append local Chrome launch args, extensions, init scripts, and userAgent overrides for stealth automation."
+  }
+}
+```
+
+#### `launch.mutate` (official envelope)
+
+Request:
+```json
+{
+  "protocol": "agent-browser.plugin.v1",
+  "type": "launch.mutate",
+  "capability": "launch.mutate",
+  "request": {
+    "args": []
+  }
+}
+```
+
+Response:
+```json
+{
+  "protocol": "agent-browser.plugin.v1",
+  "success": true,
+  "launch": {
+    "args": ["--disable-blink-features=AutomationControlled"],
+    "extensions": [],
+    "initScripts": [
+      "(function() { try { Object.defineProperty(navigator, 'webdriver', { get: function() { return undefined; }, configurable: true }); } catch(e) {} })();"
+    ],
+    "userAgent": ""
+  }
+}
+```
+
+#### `launch.mutate` (NDJSON/id simplified format)
+
+Request:
+```json
+{"type":"launch.mutate","id":"req-1","launch":{"args":[]}}
+```
+
+Response (id is preserved):
+```json
+{"id":"req-1","launch":{"args":["--disable-blink-features=AutomationControlled"],"extensions":[],"initScripts":[...],"userAgent":""}}
+```
+
+Multiple requests can be sent as newline-delimited JSON (NDJSON); each line produces one response line.
+
+#### Error response
+
+Official envelope error:
+```json
+{"protocol":"agent-browser.plugin.v1","success":false,"error":{"code":"unsupported_type","message":"Unsupported request type: \"foo\"."}}
+```
+
+NDJSON/id error:
+```json
+{"id":"req-1","error":{"code":"parse_error","message":"JSON parse error: ..."}}
+```
+
+### initScripts
+
+The plugin injects the following minimal stealth scripts into every page:
+
+1. **Hide `navigator.webdriver`** — `Object.defineProperty(navigator, 'webdriver', { get: () => undefined })` wrapped in try/catch for idempotency.
+2. **Minimal `window.chrome.runtime` shape** — sets `window.chrome = { runtime: {} }` if not already present to avoid empty-chrome fingerprinting.
+3. **No-op plugins check** — a no-op guard that avoids accidentally breaking `navigator.plugins` prototype chain.
+
+All scripts are idempotent (safe to inject multiple times) and do not override real `navigator.plugins`, `navigator.languages`, or other browser objects.
+
+### userAgent Strategy
+
+- If `AGENT_BROWSER_STEALTH_USER_AGENT` is set, that value is used.
+- Otherwise, an empty string is returned — agent-browser uses its own default UA.
+- Do **not** hardcode a UA in this plugin. A stale or platform-mismatched UA creates new fingerprint anomalies rather than eliminating them. Use the env var to supply the correct UA for your runtime.
+
+### Security Risks
+
+| Risk | Details |
+|---|---|
+| `--no-sandbox` | Disabled by default. Enable only via `AGENT_BROWSER_STEALTH_NO_SANDBOX=1`. Reduces browser sandbox isolation — only use in sandboxed CI/container environments. |
+| Stale userAgent | Hardcoded UAs go stale. Always set `AGENT_BROWSER_STEALTH_USER_AGENT` to match your actual platform. |
+| Anti-detection script failure | Sites update detection heuristics frequently. These scripts provide generic minimum coverage and do not guarantee bypass of any specific site's bot detection. |
+| Third-party extension API keys | Extension paths loaded via `AGENT_BROWSER_STEALTH_EXTENSION(S)` may require external API keys. Never commit API keys to `agent-browser.json` or any tracked file. Set them as environment variables at runtime. |
+| Over-modifying `navigator` | Aggressive navigator overrides can break page functionality. This plugin applies the minimum safe set. |
+
+---
+
 ## agent-browser-plugin-userprofile-browser
 
 A local `browser.provider` plugin that launches or connects to a Chrome browser using a real user profile, returning a CDP URL for agent-browser to consume.
