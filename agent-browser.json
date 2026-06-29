@@ -48,6 +48,12 @@
       "command": "npx",
       "name": "stealth",
       "source": "npm:agent-browser-plugin-stealth"
+    },
+    {
+      "name": "agent-browser-plugin-userprofile-browser",
+      "command": "node",
+      "args": ["./plugins/agent-browser-plugin-userprofile-browser/dist/index.js"],
+      "capabilities": ["browser.provider"]
     }
   ]
 }
