@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s -H * \"$PAPERCLIP_API_URL*\")",
+      "Bash(curl -s \"$PAPERCLIP_API_URL*\")",
+      "Bash(echo * | node dist/index.js)",
+      "Bash(echo * | node */dist/index.js)"
+    ]
+  }
+}

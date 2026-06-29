@@ -18,6 +18,7 @@ A local `launch.mutate` plugin that appends stealth-related Chrome launch argume
 - Browsers provided by a `browser.provider` plugin (e.g. cloud-browser, userprofile-browser)
 
 If you need stealth args when using a `browser.provider`, pass them explicitly in the `browser.launch` request `args` field.
+For `agent-browser-plugin-userprofile-browser`, launch mode still needs a CDP endpoint and owns its remote debugging setup; this `launch.mutate` plugin cannot remove or rewrite provider core args after the provider has launched Chrome.
 
 ### Build
 
@@ -48,6 +49,17 @@ Produces `dist/index.js`. The plugin is configured in `agent-browser.json`:
 | `AGENT_BROWSER_STEALTH_NO_SANDBOX` | Set to `1` or `true` to add `--no-sandbox` (see Security Risks) |
 
 **Extension paths must be absolute.** Relative paths or non-existent paths produce a warning on stderr; the extension is skipped rather than silently misconfigured.
+
+### Launch Args Strategy
+
+The plugin preserves caller-provided launch args, then strips common automation/default switches before returning the mutated launch config:
+
+- `--enable-automation`
+- `--disable-extensions`
+- `--disable-default-apps`
+- `--disable-component-extensions-with-background-pages`
+
+It then merges `AutomationControlled` into an existing `--disable-blink-features=...` value or appends `--disable-blink-features=AutomationControlled` when the flag is absent. This is the launch-arg equivalent of Selenium's `excludeSwitches: ["enable-automation"]` pattern. `useAutomationExtension: false` has no standalone Chrome CLI flag in this plugin surface; avoiding `--enable-automation` is the relevant part here.
 
 ### Protocol Examples
 
@@ -134,13 +146,15 @@ NDJSON/id error:
 
 ### initScripts
 
-The plugin injects the following minimal stealth scripts into every page:
+The plugin injects one bundled, idempotent stealth script into every page. It covers the generic evasion categories that fit this plugin's initScript-only surface:
 
-1. **Hide `navigator.webdriver`** — `Object.defineProperty(navigator, 'webdriver', { get: () => undefined })` wrapped in try/catch for idempotency.
-2. **Minimal `window.chrome.runtime` shape** — sets `window.chrome = { runtime: {} }` if not already present to avoid empty-chrome fingerprinting.
-3. **No-op plugins check** — a no-op guard that avoids accidentally breaking `navigator.plugins` prototype chain.
+1. **Hide `navigator.webdriver`** - deletes or overrides the prototype getter when automation exposes it.
+2. **Clean obvious headless UA leaks** - replaces `HeadlessChrome/` with `Chrome/` if no higher-level UA override already handled it.
+3. **Patch `window.chrome` shape** - adds `chrome.app`, `chrome.runtime`, `chrome.csi`, and `chrome.loadTimes` only when missing.
+4. **Patch empty navigator fields** - fills empty `languages`, missing `vendor`, low `hardwareConcurrency`, and empty `plugins`/`mimeTypes` fallbacks.
+5. **Patch browser APIs with common headless gaps** - media codec responses, notification permissions, WebGL SwiftShader values, missing outer dimensions, and `srcdoc` iframe `contentWindow`.
 
-All scripts are idempotent (safe to inject multiple times) and do not override real `navigator.plugins`, `navigator.languages`, or other browser objects.
+The script is deliberately generic. It patches missing or clearly headless-shaped values, avoids site-specific behavior, and does not override already-populated `navigator.plugins`, `navigator.languages`, or real extension-provided objects.
 
 ### userAgent Strategy
 
@@ -153,10 +167,11 @@ All scripts are idempotent (safe to inject multiple times) and do not override r
 | Risk | Details |
 |---|---|
 | `--no-sandbox` | Disabled by default. Enable only via `AGENT_BROWSER_STEALTH_NO_SANDBOX=1`. Reduces browser sandbox isolation — only use in sandboxed CI/container environments. |
+| Stripped default args | The plugin removes `--disable-extensions` and related default switches to match a more normal Chrome shape. Do not use the stealth plugin when those flags are required for isolation. |
 | Stale userAgent | Hardcoded UAs go stale. Always set `AGENT_BROWSER_STEALTH_USER_AGENT` to match your actual platform. |
 | Anti-detection script failure | Sites update detection heuristics frequently. These scripts provide generic minimum coverage and do not guarantee bypass of any specific site's bot detection. |
 | Third-party extension API keys | Extension paths loaded via `AGENT_BROWSER_STEALTH_EXTENSION(S)` may require external API keys. Never commit API keys to `agent-browser.json` or any tracked file. Set them as environment variables at runtime. |
-| Over-modifying `navigator` | Aggressive navigator overrides can break page functionality. This plugin applies the minimum safe set. |
+| Over-modifying browser APIs | Aggressive overrides can break page functionality. This plugin uses fallback-only patches where possible and keeps the behavior generic. |
 
 ---
 
