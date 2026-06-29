@@ -1,0 +1,72 @@
+# OS files
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependency directories
+node_modules/
+
+# Build output
+build/
+dist/
+out/
+coverage/
+.tmp/
+tmp/
+.cache/
+.parcel-cache/
+.turbo/
+.eslintcache
+
+# Environment files (keep local secrets out of git)
+.env
+.env.*
+!.env.example
+
+# Local secret config
+capsolver-extension/assets/config.js
+
+# Package manager caches
+.npm/
+.pnpm-store/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.yarn/install-state.gz
+
+# Runtime and lock files
+*.pid
+*.seed
+*.pid.lock
+
+# Test artifacts
+.nyc_output/
+
+# Shell artifacts
+*.out
+*.err
+*.stackdump
+
+# Misc
+*.tgz
+
+# Auth / session files with sensitive credentials
+my-auth.json
+*-auth.json

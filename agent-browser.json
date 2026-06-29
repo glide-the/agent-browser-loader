@@ -1,0 +1,53 @@
+{
+  "plugins": [
+    {
+      "args": [
+        "-y",
+        "agent-browser-plugin-captcha"
+      ],
+      "capabilities": [
+        "command.run",
+        "captcha.solve"
+      ],
+      "command": "npx",
+      "name": "captcha",
+      "source": "npm:agent-browser-plugin-captcha"
+    },
+    {
+      "args": [
+        "-y",
+        "@company/agent-browser-plugin-vault"
+      ],
+      "capabilities": [
+        "credential.read"
+      ],
+      "command": "npx",
+      "name": "vault",
+      "source": "npm:@company/agent-browser-plugin-vault"
+    },
+    {
+      "args": [
+        "-y",
+        "github:org/agent-browser-plugin-cloud-browser"
+      ],
+      "capabilities": [
+        "browser.provider"
+      ],
+      "command": "npx",
+      "name": "cloud-browser",
+      "source": "github:org/agent-browser-plugin-cloud-browser"
+    },
+    {
+      "args": [
+        "-y",
+        "agent-browser-plugin-stealth"
+      ],
+      "capabilities": [
+        "launch.mutate"
+      ],
+      "command": "npx",
+      "name": "stealth",
+      "source": "npm:agent-browser-plugin-stealth"
+    }
+  ]
+}
