@@ -6,8 +6,41 @@ set -eo pipefail
 # rsync 退出码 23/24 表示部分文件跳过，属于正常
 RSYNC_OK() { local rc=$1; [[ $rc -eq 0 || $rc -eq 23 || $rc -eq 24 ]] && return 0 || return $rc; }
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$HOME/Library/Application Support/Google/Chrome"
 DEBUG_DIR="$HOME/Library/Application Support/Google/ChromeRemoteDebug"
+
+# ---------------------------------------------------------------------------
+# Extensions + initScripts
+# 镜像 plugins/agent-browser-plugin-stealth/src/index.ts 的 Extensions 与
+# initScripts 能力：
+#   - Extensions: 默认加载 capsolver-extension。
+#   - initScripts: 通过独立的 stealth-extension（document_start + MAIN world
+#     内容脚本）注入隐身初始化脚本。
+# ---------------------------------------------------------------------------
+STEALTH_EXT_DIR="$SCRIPT_DIR/stealth-extension"
+
+# 默认加载的扩展：capsolver + stealth 初始化扩展（initScripts 能力）
+EXTENSION_PATHS=(
+  "$SCRIPT_DIR/capsolver-extension"
+  "$STEALTH_EXT_DIR"
+)
+
+# 校验路径并拼接 --load-extension 参数
+CHROME_EXTENSION_ARGS=()
+VALID_EXTENSIONS=()
+for _ext in "${EXTENSION_PATHS[@]}"; do
+  if [[ -d "$_ext" ]]; then
+    VALID_EXTENSIONS+=("$_ext")
+  else
+    echo "⚠️  扩展路径不存在，已跳过: $_ext" >&2
+  fi
+done
+if [[ ${#VALID_EXTENSIONS[@]} -gt 0 ]]; then
+  _joined="$(IFS=','; echo "${VALID_EXTENSIONS[*]}")"
+  CHROME_EXTENSION_ARGS+=("--load-extension=$_joined")
+  echo "🧩 加载扩展: $_joined"
+fi
 
 echo "🔄 退出 Chrome..."
 pkill -f "Google Chrome" 2>/dev/null || true
@@ -43,6 +76,7 @@ echo "🚀 启动 Chrome 调试模式..."
   --profile-directory="Default" \
   --disable-blink-features=AutomationControlled \
   --disable-infobars \
+  "${CHROME_EXTENSION_ARGS[@]}" \
   "$@" > /tmp/chrome-debug.log 2>&1 &
 
 echo "⏳ 等待调试端口就绪..."

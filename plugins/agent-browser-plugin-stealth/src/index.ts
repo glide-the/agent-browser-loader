@@ -19,8 +19,9 @@
  */
 
 import { existsSync, readdirSync, mkdirSync, appendFileSync } from "fs";
-import { resolve, join } from "path";
+import { resolve, join, dirname, basename } from "path";
 import { homedir, platform } from "os";
+import { spawnSync } from "child_process";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -73,8 +74,15 @@ interface LaunchMutateRequest {
 }
 
 interface ProfileConfig {
-  userDataDir: string;
+  // Real Chrome user-data-dir holding the logged-in profile. Used as the rsync
+  // source, never passed to Chrome directly (that triggers Chrome's
+  // "non-default data directory" restriction and profile-lock conflicts).
+  sourceUserDataDir: string;
+  // Separate copy used as the launched --user-data-dir.
+  debugUserDataDir: string;
   profileDirectory: string;
+  // When true, rsync-sync the source profile into the debug dir before launch.
+  syncProfile: boolean;
 }
 
 interface LaunchMutateResponse extends PluginSuccessResponse {
@@ -282,19 +290,173 @@ function getDefaultUserDataDir(): string {
   return googleChrome;
 }
 
+// Debug copy lives next to the real Chrome data dir, mirroring
+// start-chrome-debug.sh's ~/.../Google/ChromeRemoteDebug convention.
+function getDefaultDebugDataDir(sourceUserDataDir: string): string {
+  return join(
+    dirname(sourceUserDataDir),
+    `${basename(sourceUserDataDir)}RemoteDebug`
+  );
+}
+
+function isFalsyEnv(value: string | undefined): boolean {
+  return value === "0" || value === "false";
+}
+
 function resolveProfileConfig(req: LaunchMutateRequest): ProfileConfig {
   const envDir =
     process.env["AGENT_BROWSER_USERPROFILE_DIR"] ??
     process.env["AGENT_BROWSER_USERPROFILE_NAME"];
   const envProfileDir = process.env["AGENT_BROWSER_PROFILE_DIRECTORY"];
+  const envDebugDir = process.env["AGENT_BROWSER_USERPROFILE_DEBUG_DIR"];
 
   const rawDir = req.userDataDir ?? envDir ?? getDefaultUserDataDir();
   const rawProfileDir = req.profileDirectory ?? envProfileDir ?? "Default";
 
+  const sourceUserDataDir = resolvePath(rawDir);
+  const debugUserDataDir = resolvePath(
+    envDebugDir ?? getDefaultDebugDataDir(sourceUserDataDir)
+  );
+
+  // Sync is on by default (mirrors start-chrome-debug.sh). Disable with
+  // AGENT_BROWSER_USERPROFILE_SYNC=0 to point --user-data-dir at the source dir.
+  const syncProfile = !isFalsyEnv(process.env["AGENT_BROWSER_USERPROFILE_SYNC"]);
+
   return {
-    userDataDir: resolvePath(rawDir),
+    sourceUserDataDir,
+    debugUserDataDir,
     profileDirectory: rawProfileDir,
+    syncProfile,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Profile sync (mirrors start-chrome-debug.sh)
+//
+// rsync-syncs the real Chrome profile into a separate debug user-data-dir so an
+// automated launch can reuse a logged-in profile without hitting Chrome's
+// "non-default data directory" restriction or the live profile lock. Lock,
+// log, journal and cache files are excluded so the copy is safe even while the
+// real Chrome is running.
+// ---------------------------------------------------------------------------
+
+const RSYNC_PROFILE_EXCLUDES = [
+  "LOCK",
+  "LOG",
+  "LOG.old",
+  "SingletonLock",
+  "SingletonCookie",
+  "SingletonSocket",
+  "CrashpadMetrics*",
+  "*-journal",
+  "*-wal",
+  "*-shm",
+  "GPUCache/",
+  "DawnGraphiteCache/",
+  "DawnWebGPUCache/",
+  "ShaderCache/",
+  "Code Cache/",
+];
+
+/**
+ * Returns the user-data-dir that should be passed to Chrome: the synced debug
+ * dir on success, or the source dir as a fallback when rsync is unavailable.
+ */
+function syncProfileToDebugDir(profile: ProfileConfig): string {
+  const srcProfile = join(profile.sourceUserDataDir, profile.profileDirectory);
+  const dstProfile = join(profile.debugUserDataDir, profile.profileDirectory);
+
+  // Safety guard: never rsync onto the source itself. With --delete this could
+  // remove files from the real Chrome profile. If the debug dir resolves to the
+  // source dir, skip the copy and use the source directly.
+  if (profile.debugUserDataDir === profile.sourceUserDataDir) {
+    stderr(
+      `Debug dir equals source dir (${profile.sourceUserDataDir}); ` +
+        `skipping profile sync to avoid mutating the real profile.`
+    );
+    fileLog("profile.sync.skip", {
+      reason: "debug_equals_source",
+      dir: profile.sourceUserDataDir,
+    });
+    return profile.sourceUserDataDir;
+  }
+
+  if (!existsSync(srcProfile)) {
+    stderr(
+      `Source profile not found, skipping profile sync: ${srcProfile}. ` +
+        `Launching with a fresh profile at ${profile.debugUserDataDir}.`
+    );
+    fileLog("profile.sync.skip", { reason: "source_missing", srcProfile });
+    return profile.debugUserDataDir;
+  }
+
+  try {
+    mkdirSync(dstProfile, { recursive: true });
+  } catch (e) {
+    stderr(
+      `Could not create debug profile dir ${dstProfile}: ${String(e)}. ` +
+        `Falling back to source user-data-dir.`
+    );
+    fileLog("profile.sync.error", { stage: "mkdir", dstProfile, error: String(e) });
+    return profile.sourceUserDataDir;
+  }
+
+  // Trailing slash on the source copies its contents into the destination.
+  const rsyncArgs = [
+    "-a",
+    "--delete",
+    "--ignore-errors",
+    "--partial",
+    ...RSYNC_PROFILE_EXCLUDES.map((p) => `--exclude=${p}`),
+    `${srcProfile}/`,
+    `${dstProfile}/`,
+  ];
+
+  fileLog("profile.sync.start", { srcProfile, dstProfile });
+  const result = spawnSync("rsync", rsyncArgs, {
+    stdio: ["ignore", "ignore", "inherit"],
+  });
+
+  if (result.error) {
+    const code = (result.error as { code?: string }).code;
+    if (code === "ENOENT") {
+      stderr(
+        "rsync not found on PATH; skipping profile sync and falling back to " +
+          "source user-data-dir."
+      );
+      fileLog("profile.sync.error", { stage: "spawn", reason: "rsync_missing" });
+      return profile.sourceUserDataDir;
+    }
+    stderr(
+      `rsync failed to start: ${String(result.error)}. ` +
+        `Falling back to source user-data-dir.`
+    );
+    fileLog("profile.sync.error", { stage: "spawn", error: String(result.error) });
+    return profile.sourceUserDataDir;
+  }
+
+  // rsync exit codes 0/23/24 are acceptable (partial transfer of vanished files).
+  const exitCode = result.status ?? -1;
+  if (exitCode === 0 || exitCode === 23 || exitCode === 24) {
+    stderr(
+      `Profile synced to debug dir: ${profile.debugUserDataDir} (rsync exit ${exitCode}).`
+    );
+    fileLog("profile.sync.done", {
+      debugUserDataDir: profile.debugUserDataDir,
+      exitCode,
+    });
+    return profile.debugUserDataDir;
+  }
+
+  stderr(
+    `rsync exited with code ${exitCode}; using synced debug dir anyway: ` +
+      `${profile.debugUserDataDir}.`
+  );
+  fileLog("profile.sync.warn", {
+    debugUserDataDir: profile.debugUserDataDir,
+    exitCode,
+  });
+  return profile.debugUserDataDir;
 }
 
 function argFlagName(arg: string): string | null {
@@ -313,9 +475,13 @@ function hasArg(args: string[], candidate: string): boolean {
   return args.some((arg) => argFlagName(arg) === candidateFlag);
 }
 
-function appendProfileArgs(existingArgs: string[], profile: ProfileConfig): string[] {
+function appendProfileArgs(
+  existingArgs: string[],
+  userDataDir: string,
+  profile: ProfileConfig
+): string[] {
   const desiredArgs = [
-    `--user-data-dir=${profile.userDataDir}`,
+    `--user-data-dir=${userDataDir}`,
     `--profile-directory=${profile.profileDirectory}`,
     "--no-first-run",
     "--no-default-browser-check",
@@ -883,11 +1049,15 @@ function handleLaunchMutate(req: LaunchMutateRequest): LaunchMutateResponse {
     initScriptsCount: (req.initScripts ?? []).length,
     hasUserAgent: Boolean(req.userAgent),
     profileDirectory: profile.profileDirectory,
+    syncProfile: profile.syncProfile,
   });
 
   const existingArgs = req.args ?? [];
   const stealthArgs = getStealthArgs(existingArgs);
-  const args = appendProfileArgs(stealthArgs, profile);
+  const effectiveUserDataDir = profile.syncProfile
+    ? syncProfileToDebugDir(profile)
+    : profile.sourceUserDataDir;
+  const args = appendProfileArgs(stealthArgs, effectiveUserDataDir, profile);
   const extensions = getExtensions(req.extensions ?? []);
   const initScripts = Array.from(new Set([...(req.initScripts ?? []), ...INIT_SCRIPTS]));
   const userAgent = getUserAgent(req.userAgent);

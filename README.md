@@ -50,8 +50,21 @@ Produces `dist/index.js`. The plugin is configured in `agent-browser.json`:
 | `AGENT_BROWSER_STEALTH_NO_SANDBOX` | Set to `1` or `true` to add `--no-sandbox` (see Security Risks) |
 | `AGENT_BROWSER_USERPROFILE_DIR` | Chrome user data dir for `--user-data-dir` (also `AGENT_BROWSER_USERPROFILE_NAME`) |
 | `AGENT_BROWSER_PROFILE_DIRECTORY` | Chrome profile name for `--profile-directory` (default `Default`) |
+| `AGENT_BROWSER_USERPROFILE_SYNC` | Set to `0`/`false` to disable profile sync and point `--user-data-dir` at the source dir directly (default: sync enabled) |
+| `AGENT_BROWSER_USERPROFILE_DEBUG_DIR` | Override the rsync target dir used as `--user-data-dir` (default: `<ChromeDir>RemoteDebug` next to the source) |
 
 **Extension paths must be absolute.** Relative paths or non-existent paths produce a warning on stderr; the extension is skipped rather than silently misconfigured.
+
+### Profile Sync (logged-in profile reuse)
+
+To reuse a logged-in Chrome profile, Chrome cannot be launched with `--user-data-dir` pointing at the real Chrome data directory: automation against the default data directory is blocked, and the live profile is locked while Chrome is running. Mirroring `start-chrome-debug.sh`, the plugin therefore rsync-syncs the source profile into a separate debug user-data-dir before launch and points `--user-data-dir` at that copy.
+
+- Source: `AGENT_BROWSER_USERPROFILE_DIR` (defaults to the OS Chrome data dir).
+- Target: `AGENT_BROWSER_USERPROFILE_DEBUG_DIR` (defaults to a `…RemoteDebug` sibling of the source).
+- Only the `--profile-directory` profile (default `Default`) is synced.
+- Lock, log, journal (`*-wal`/`*-shm`/`*-journal`), `Singleton*`, and cache dirs (`GPUCache`, `Code Cache`, shader/Dawn caches) are excluded, so the copy is safe even while the real Chrome is running. You do not need to quit Chrome first.
+- `rsync` must be on `PATH`. If it is missing, the plugin warns on stderr and falls back to the source dir.
+- Set `AGENT_BROWSER_USERPROFILE_SYNC=0` to skip the sync and use the source dir directly.
 
 ### Launch Args Strategy
 

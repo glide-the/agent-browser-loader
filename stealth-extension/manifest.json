@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "agent-browser-stealth-init",
+  "version": "1.0.0",
+  "description": "Injects the stealth init script at document_start in the MAIN world. Mirrors INIT_SCRIPTS from plugins/agent-browser-plugin-stealth/src/index.ts so start-chrome-debug.sh gains the same initScripts capability.",
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["stealth-init.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "world": "MAIN"
+    }
+  ]
+}
