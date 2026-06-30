@@ -10,7 +10,7 @@ This workspace contains local plugins for [agent-browser](https://github.com/age
 
 A local `launch.mutate` plugin that appends stealth-related Chrome launch arguments, extensions, initScripts, and a custom userAgent to agent-browser local launches. It also injects Chrome user-profile args (`--user-data-dir` / `--profile-directory`) read from the state file written by `agent-browser-plugin-userprofile-browser`, so a logged-in profile can be reused on the local launch path while still loading extensions.
 
-> The heavy one-time profile rsync lives in the `agent-browser-plugin-userprofile-browser` `command.run` plugin (see below). This `launch.mutate` plugin only reads the persisted launch directory, so it never blocks startup with a sync.
+> The heavy one-time profile rsync + Chrome launch lives in the `agent-browser-plugin-userprofile-browser` `browser.provider` plugin (see below). This `launch.mutate` plugin only reads the persisted launch directory on the local-launch path, so it never blocks startup with a sync.
 
 ### Scope and Limitations
 
@@ -62,8 +62,9 @@ To reuse a logged-in Chrome profile, Chrome cannot be launched with `--user-data
 pointing at the real Chrome data directory: automation against the default data directory is
 blocked, and the live profile is locked while Chrome is running. The one-time `rsync` into a
 separate `RemoteDebug` user-data-dir is therefore handled by the
-`agent-browser-plugin-userprofile-browser` `command.run` plugin (see below). This
-`launch.mutate` plugin only **reads** the resulting launch directory:
+`agent-browser-plugin-userprofile-browser` `browser.provider` plugin (see below). On the
+local-launch (`launch.mutate`) path, this stealth plugin only **reads** the resulting launch
+directory:
 
 - It reads `.agent-browser/userprofile-browser-state.json` and injects `--user-data-dir` /
   `--profile-directory` from it.
@@ -200,28 +201,28 @@ The `console.table` and `performance.now` hooks are intentionally small. They ta
 
 ## agent-browser-plugin-userprofile-browser
 
-A `command.run` plugin that prepares a real Chrome profile for stealth automation. It performs a **one-time** full `rsync` of the real Chrome profile into a separate `RemoteDebug` user-data-dir — bypassing Chrome's "non-default data directory" detection and the live-profile lock — then persists the resulting launch directory to a local state file. The `agent-browser-plugin-stealth` `launch.mutate` plugin reads that state file and injects `--user-data-dir` / `--profile-directory`, so the heavy sync runs once instead of blocking every launch.
+A `browser.provider` plugin (`--provider userprofile-browser`) that prepares and drives a real
+Chrome profile for stealth automation. On `browser.launch` it performs a **one-time** full
+`rsync` of the real Chrome profile into a separate `RemoteDebug` user-data-dir — bypassing
+Chrome's "non-default data directory" detection and the live-profile lock — then launches Chrome
+from that copy with a remote-debugging port and returns the CDP WebSocket URL. agent-browser
+connects to that URL to drive the logged-in profile. Because the provider launches Chrome
+itself, it can load the profile and extensions directly (the provider path, unlike `--provider`
++ `--extension` mixing, is fully under the plugin's control).
 
-### Why a separate plugin
+### Why a browser.provider
 
-`launch.mutate` runs on *every* local launch. Putting the profile `rsync` there blocked startup repeatedly. Moving it to `command.run` means the sync is an explicit, one-time step:
-
-```bash
-# 1. Sync the real profile once and persist the launch dir
-agent-browser plugin run userprofile-browser browser.launch
-
-# 2. Normal launches now reuse the synced profile (stealth reads the state file)
-agent-browser --extension ./capsolver-extension --headed open https://example.com
-
-# 3. Clean up the persisted state when done
-agent-browser plugin run userprofile-browser browser.close
-```
-
-To refresh the synced profile (e.g. to pick up new cookies), pass `force`:
+`launch.mutate` runs on *every* local launch — putting the heavy profile `rsync` there blocked
+startup repeatedly. As a `browser.provider`, the sync + Chrome launch happen once per session
+and agent-browser simply attaches to the returned CDP URL:
 
 ```bash
-agent-browser plugin run userprofile-browser browser.launch --payload '{"force":true}'
+# Launch Chrome from the synced logged-in profile and drive it
+agent-browser --provider userprofile-browser open https://example.com
 ```
+
+The provider tracks each launched Chrome in a local **session registry** so a later
+`browser.close` (a separate process) can terminate it by `sessionId`.
 
 ### Build
 
@@ -237,7 +238,7 @@ Produces `dist/index.js`. The plugin is configured in `agent-browser.json`:
   "name": "userprofile-browser",
   "command": "node",
   "args": ["./plugins/agent-browser-plugin-userprofile-browser/dist/index.js"],
-  "capabilities": ["command.run"]
+  "capabilities": ["browser.provider"]
 }
 ```
 
@@ -264,7 +265,7 @@ reach them. Configuration is read from a local JSON file shared with the stealth
 | `userDataDir` | Source Chrome user-data-dir to copy FROM |
 | `profileDirectory` | Profile sub-directory name to sync (default `Default`) |
 | `debugDir` | Target `RemoteDebug` user-data-dir to copy TO and launch FROM (default `<source>RemoteDebug` sibling) |
-| `statePath` | Path of the shared state file (default `<cwd>/.agent-browser/userprofile-browser-state.json`) |
+| `statePath` | Path of the sync-marker state file (default `<cwd>/.agent-browser/userprofile-browser-state.json`) |
 
 All fields are optional. The corresponding `AGENT_BROWSER_USERPROFILE_DIR` /
 `AGENT_BROWSER_USERPROFILE_NAME` / `AGENT_BROWSER_PROFILE_DIRECTORY` /
@@ -279,62 +280,119 @@ are still honored as a last-resort fallback, but the config file is the primary 
 2. **Profile** (`request.profileDirectory` → config `profileDirectory` → env → `Default`)
 3. **Target debug dir** (`request.debugDir` → config `debugDir` → env → `<source>RemoteDebug` sibling, e.g. `~/Library/Application Support/Google/ChromeRemoteDebug`)
 4. **State file** (config `statePath` → env `AGENT_BROWSER_USERPROFILE_STATE` → `<cwd>/.agent-browser/userprofile-browser-state.json`)
+5. **Chrome executable** (`request.executablePath` → platform default: macOS `/Applications/Google Chrome.app/...`; Linux `google-chrome`/`chromium` on `PATH`)
 
-### Request types
+### Request types (capability `browser.provider`)
 
 #### `browser.launch`
 
-`rsync`-syncs `source/<profile>/` → `debug/<profile>/` (excluding lock, log, journal, and cache files) and writes the state file. Idempotent: if the state file already exists it skips the sync unless `force: true` is passed.
+`rsync`-syncs `source/<profile>/` → `debug/<profile>/` (excluding lock, log, journal, and cache
+files), launches Chrome with `--remote-debugging-port`, `--user-data-dir=<debug>`,
+`--profile-directory`, and resolves the CDP URL from `<debug>/DevToolsActivePort`. The rsync is
+idempotent — it is skipped if the profile was already synced unless `force: true`. If `cdpUrl`
+is supplied, the plugin connects to that running Chrome instead of launching.
 
-Request payload (all optional):
+Request (all optional):
 ```json
-{ "userDataDir": "...", "profileDirectory": "Default", "debugDir": "...", "force": false }
+{
+  "userDataDir": "...",
+  "profileDirectory": "Default",
+  "debugDir": "...",
+  "executablePath": "/path/to/chrome",
+  "cdpUrl": "ws://127.0.0.1:9222/...",
+  "port": 0,
+  "args": ["--headless=new"],
+  "force": false
+}
 ```
 
-Response:
+Response (field `browser`):
 ```json
 {
   "protocol": "agent-browser.plugin.v1",
   "success": true,
-  "data": {
-    "userDataDir": "/Users/example/Library/Application Support/Google/ChromeRemoteDebug",
-    "profileDirectory": "Default",
-    "source": "/Users/example/Library/Application Support/Google/Chrome",
-    "synced": true,
-    "statePath": "/abs/.agent-browser/userprofile-browser-state.json"
+  "browser": {
+    "cdpUrl": "ws://127.0.0.1:63009/devtools/browser/<id>",
+    "directPage": false,
+    "metadata": {
+      "userDataDir": "/Users/example/Library/Application Support/Google/ChromeRemoteDebug",
+      "profileDirectory": "Default",
+      "source": "/Users/example/Library/Application Support/Google/Chrome",
+      "mode": "launch",
+      "sessionId": "userprofile-launch-92349-1782821944151",
+      "port": 63009,
+      "pid": 92368,
+      "synced": true
+    },
+    "cleanup": { "sessionId": "userprofile-launch-92349-1782821944151" }
   }
 }
 ```
 
+`mode` is `"launch"` (Chrome spawned) or `"connect"` (attached to a supplied `cdpUrl`).
+
 #### `browser.close`
 
-Removes the persisted state file (and, with `{"removeDebugDir":true}`, the synced debug dir).
+Terminates the Chrome started by `browser.launch` (looked up by `sessionId` in the session
+registry). Idempotent: an unknown / already-closed session is a `noOp` success. With
+`{"removeDebugDir":true}` it also removes the synced debug dir and the sync marker.
 
-Response:
+Request:
+```json
+{ "sessionId": "userprofile-launch-92349-1782821944151", "removeDebugDir": false }
+```
+
+Response (field `data`):
 ```json
 {
   "protocol": "agent-browser.plugin.v1",
   "success": true,
-  "data": { "closed": true, "removedState": true, "removedDebugDir": false }
+  "data": { "closed": true, "removedDebugDir": false }
 }
 ```
 
-### State file
-
-The state file is the contract between the two plugins. Both default to `<cwd>/.agent-browser/userprofile-browser-state.json`; relocate it by setting `statePath` in `.agent-browser/userprofile.config.json` (read by both plugins).
-
+Idempotent / connect-mode response:
 ```json
 {
-  "userDataDir": "/Users/example/Library/Application Support/Google/ChromeRemoteDebug",
-  "profileDirectory": "Default",
-  "source": "/Users/example/Library/Application Support/Google/Chrome",
-  "syncedAt": "2026-06-30T00:00:00.000Z"
+  "protocol": "agent-browser.plugin.v1",
+  "success": true,
+  "data": { "closed": false, "noOp": true }
 }
 ```
+
+### State & session files
+
+- **Sync marker** `<cwd>/.agent-browser/userprofile-browser-state.json` — records the synced
+  launch dir so the rsync runs only once (also consumed by the stealth plugin's local-launch
+  fallback). Relocate via `statePath` in the config file.
+
+  ```json
+  {
+    "userDataDir": "/Users/example/Library/Application Support/Google/ChromeRemoteDebug",
+    "profileDirectory": "Default",
+    "source": "/Users/example/Library/Application Support/Google/Chrome",
+    "syncedAt": "2026-06-30T00:00:00.000Z"
+  }
+  ```
+
+- **Session registry** `<cwd>/.agent-browser/userprofile-browser-sessions.json` — maps
+  `sessionId` → `{ mode, pid, port, cdpUrl, userDataDir, profileDirectory, startedAt }` for live
+  Chrome processes, so `browser.close` can terminate them.
+
+### Error codes
+
+| code | meaning |
+|---|---|
+| `profile_not_found` | the source `<userDataDir>/<profileDirectory>` does not exist |
+| `chrome_not_found` | no Chrome/Chromium executable found (pass `executablePath`) |
+| `launch_failed` | Chrome failed to start or the DevTools endpoint never appeared |
 
 ### Profile Lock Risk
 
-The plugin never starts or kills Chrome and never deletes Chrome lock files. The `rsync` excludes `SingletonLock`/`LOCK`/journal/cache files so the copy is safe even while the real Chrome is running, but for a fully consistent snapshot run `browser.launch` while Chrome is closed.
+The provider launches Chrome only against the **synced copy**, never the real Chrome data dir.
+The `rsync` excludes `SingletonLock`/`LOCK`/journal/cache files so the copy is safe even while
+the real Chrome is running, but for a fully consistent snapshot run `browser.launch` while the
+real Chrome is closed.
 
 ### Security Notice
 

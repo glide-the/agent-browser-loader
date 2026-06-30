@@ -1,25 +1,27 @@
 #!/usr/bin/env node
 /**
  * agent-browser-plugin-userprofile-browser
- * command.run plugin for agent-browser
+ * browser.provider plugin for agent-browser
  *
- * Performs a ONE-TIME full rsync of the real Chrome profile into a separate
- * "RemoteDebug" user-data-dir — bypassing the "non-default data directory"
- * detection used by some anti-bot sites — then persists the resolved
- * user-data-dir / profile-directory to a local state file so that the
- * agent-browser-plugin-stealth launch.mutate plugin can inject
- * --user-data-dir / --profile-directory WITHOUT re-running the heavy sync on
- * every local launch.
+ * Acts as the browser provider (`--provider userprofile-browser`). On
+ * `browser.launch` it performs a ONE-TIME full rsync of the real Chrome profile
+ * into a separate "RemoteDebug" user-data-dir — bypassing the "non-default data
+ * directory" detection used by some anti-bot sites and the live-profile lock —
+ * then launches Chrome from that copy with a remote-debugging port and returns
+ * the CDP WebSocket URL so agent-browser can drive the logged-in profile.
  *
- * Capability: command.run
- * Request types (invoked via `agent-browser plugin run <name> <type>`):
- *   - browser.launch : rsync profile + persist state, returns { data }
- *   - browser.close  : remove persisted state, returns { data }
+ * Capability: browser.provider
+ * Request types:
+ *   - browser.launch : rsync profile + launch (or connect) Chrome,
+ *                      returns { browser: { cdpUrl, directPage, metadata, cleanup } }
+ *   - browser.close  : terminate the Chrome started by browser.launch (by
+ *                      sessionId), returns { data: { closed } }
  *
  * Protocol: agent-browser.plugin.v1 (stdin/stdout JSON)
  *
- * This plugin never starts or kills Chrome and never deletes profile lock
- * files; it only syncs profile data and records the launch directory.
+ * Live Chrome processes are tracked in a local session registry file so that a
+ * subsequent `browser.close` (a separate process) can terminate them. The
+ * plugin never deletes profile lock files of the *real* Chrome.
  */
 
 import {
@@ -30,9 +32,10 @@ import {
   rmSync,
   writeFileSync,
 } from "fs";
-import { execFileSync } from "child_process";
+import { execFileSync, spawn } from "child_process";
 import { homedir, platform } from "os";
 import { basename, dirname, join, resolve } from "path";
+import { setTimeout as sleep } from "timers/promises";
 
 // ─── Protocol Types ──────────────────────────────────────────────────────────
 
@@ -71,9 +74,21 @@ interface CommandRunResponse extends PluginSuccessResponse {
   data: Record<string, unknown>;
 }
 
+interface BrowserProviderResponse extends PluginSuccessResponse {
+  browser: {
+    cdpUrl: string;
+    directPage: boolean;
+    metadata: Record<string, unknown>;
+    cleanup: {
+      sessionId: string;
+    };
+  };
+}
+
 type PluginResponse =
   | PluginManifestResponse
   | CommandRunResponse
+  | BrowserProviderResponse
   | PluginErrorResponse;
 
 interface BrowserLaunchRequest {
@@ -83,12 +98,22 @@ interface BrowserLaunchRequest {
   profileDirectory?: string;
   /** Target "RemoteDebug" user-data-dir to copy TO and launch FROM. */
   debugDir?: string;
-  /** Force re-sync even if a state file already exists. */
+  /** Chrome/Chromium executable path. Auto-detected when omitted. */
+  executablePath?: string;
+  /** Connect to an already-running Chrome at this CDP URL instead of launching. */
+  cdpUrl?: string;
+  /** Remote-debugging port; 0 / omitted lets Chrome pick a free port. */
+  port?: number;
+  /** Extra Chrome launch args. */
+  args?: string[];
+  /** Force re-sync even if the profile was already synced. */
   force?: boolean;
 }
 
 interface BrowserCloseRequest {
-  /** Remove the synced debug directory in addition to the state file. */
+  /** Session id returned by browser.launch (cleanup.sessionId). */
+  sessionId?: string;
+  /** Remove the synced debug directory in addition to closing Chrome. */
   removeDebugDir?: boolean;
 }
 
@@ -97,6 +122,28 @@ interface ProfileState {
   profileDirectory: string;
   source: string;
   syncedAt: string;
+}
+
+interface SessionEntry {
+  sessionId: string;
+  mode: "launch" | "connect";
+  pid?: number;
+  port?: number;
+  cdpUrl: string;
+  userDataDir: string;
+  profileDirectory: string;
+  startedAt: string;
+}
+
+type SessionRegistry = Record<string, SessionEntry>;
+
+class ProviderError extends Error {
+  code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.code = code;
+    this.name = "ProviderError";
+  }
 }
 
 // ─── File Logger ──────────────────────────────────────────────────────────────
@@ -298,6 +345,162 @@ function syncProfile(sourceProfileDir: string, targetProfileDir: string): void {
   }
 }
 
+// ─── Session registry ─────────────────────────────────────────────────────────
+// Live Chrome processes started by browser.launch are recorded here so a later
+// browser.close (a separate plugin process) can terminate them by sessionId.
+
+function getSessionsPath(config: UserProfileConfig): string {
+  return join(dirname(getStatePath(config)), "userprofile-browser-sessions.json");
+}
+
+function readSessions(sessionsPath: string): SessionRegistry {
+  if (!existsSync(sessionsPath)) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(sessionsPath, "utf8")) as unknown;
+    if (parsed && typeof parsed === "object") {
+      return parsed as SessionRegistry;
+    }
+  } catch {
+    stderr(`Failed to parse session registry at ${sessionsPath}; resetting.`);
+  }
+  return {};
+}
+
+function writeSessions(sessionsPath: string, registry: SessionRegistry): void {
+  mkdirSync(dirname(sessionsPath), { recursive: true });
+  writeFileSync(sessionsPath, JSON.stringify(registry, null, 2) + "\n");
+}
+
+function makeSessionId(mode: "launch" | "connect"): string {
+  return `userprofile-${mode}-${process.pid}-${Date.now()}`;
+}
+
+// ─── Chrome launch ─────────────────────────────────────────────────────────────
+
+function resolveChromeExecutable(explicit?: string): string {
+  if (explicit && explicit.trim()) {
+    const p = resolvePath(explicit.trim());
+    if (existsSync(p)) {
+      return p;
+    }
+    throw new ProviderError("chrome_not_found", `Chrome executable not found: ${p}`);
+  }
+
+  const plat = platform();
+  const candidates: string[] = [];
+
+  if (plat === "darwin") {
+    candidates.push(
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+      "/Applications/Chromium.app/Contents/MacOS/Chromium"
+    );
+  } else if (plat !== "win32") {
+    for (const name of ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]) {
+      try {
+        const found = execFileSync("which", [name], {
+          stdio: ["ignore", "pipe", "ignore"],
+        })
+          .toString()
+          .trim();
+        if (found) {
+          candidates.push(found);
+        }
+      } catch {
+        // not on PATH; try next
+      }
+    }
+  }
+
+  for (const c of candidates) {
+    if (existsSync(c)) {
+      return c;
+    }
+  }
+
+  throw new ProviderError(
+    "chrome_not_found",
+    "Could not find a Chrome/Chromium executable. Pass request.executablePath."
+  );
+}
+
+interface LaunchedChrome {
+  pid: number;
+  port: number;
+  cdpUrl: string;
+}
+
+async function launchChrome(opts: {
+  executablePath?: string;
+  userDataDir: string;
+  profileDirectory: string;
+  port?: number;
+  extraArgs: string[];
+}): Promise<LaunchedChrome> {
+  const exe = resolveChromeExecutable(opts.executablePath);
+  const requestedPort =
+    typeof opts.port === "number" && opts.port > 0 ? opts.port : 0;
+
+  // Chrome writes the actual port + browser ws path to <user-data-dir>/DevToolsActivePort
+  // once the debug server is up. Remove any stale file first.
+  const devtoolsPortFile = join(opts.userDataDir, "DevToolsActivePort");
+  if (existsSync(devtoolsPortFile)) {
+    rmSync(devtoolsPortFile, { force: true });
+  }
+
+  const args = [
+    `--remote-debugging-port=${requestedPort}`,
+    `--user-data-dir=${opts.userDataDir}`,
+    `--profile-directory=${opts.profileDirectory}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-blink-features=AutomationControlled",
+    ...opts.extraArgs,
+  ];
+
+  fileLog("chrome.spawn", { exe, args });
+
+  let child;
+  try {
+    child = spawn(exe, args, { detached: true, stdio: "ignore" });
+    child.unref();
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new ProviderError("launch_failed", `Failed to spawn Chrome: ${msg}`);
+  }
+
+  if (typeof child.pid !== "number") {
+    throw new ProviderError("launch_failed", "Chrome did not start (no pid).");
+  }
+
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    if (existsSync(devtoolsPortFile)) {
+      const content = readFileSync(devtoolsPortFile, "utf8").trim();
+      const lines = content.split("\n");
+      const port = parseInt(lines[0] ?? "", 10);
+      const wsPath = lines[1];
+      if (port > 0 && wsPath && wsPath.startsWith("/")) {
+        return { pid: child.pid, port, cdpUrl: `ws://127.0.0.1:${port}${wsPath}` };
+      }
+    }
+    await sleep(150);
+  }
+
+  // Timed out — clean up the process we started.
+  try {
+    process.kill(child.pid);
+  } catch {
+    // already gone
+  }
+  throw new ProviderError(
+    "launch_failed",
+    "Timed out waiting for Chrome DevTools endpoint (DevToolsActivePort)."
+  );
+}
+
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
 function handleManifest(): PluginManifestResponse {
@@ -307,18 +510,50 @@ function handleManifest(): PluginManifestResponse {
     success: true,
     manifest: {
       name: "userprofile-browser",
-      capabilities: ["command.run"],
+      capabilities: ["browser.provider"],
       description:
-        "One-time rsync of the real Chrome profile into a RemoteDebug user-data-dir, persisting the launch directory for the stealth launch.mutate plugin to consume.",
+        "Browser provider that rsyncs the real Chrome profile into a RemoteDebug user-data-dir, launches Chrome from it with a remote-debugging port, and returns the CDP URL.",
     },
   };
   fileLog("handle.manifest.response", { manifest: resp.manifest });
   return resp;
 }
 
-function handleBrowserLaunch(req: BrowserLaunchRequest): CommandRunResponse {
+async function handleBrowserLaunch(
+  req: BrowserLaunchRequest
+): Promise<BrowserProviderResponse> {
   const config = readConfig();
   const statePath = getStatePath(config);
+  const sessionsPath = getSessionsPath(config);
+
+  // Connect mode: a CDP URL was supplied — attach to that Chrome, don't launch.
+  if (req.cdpUrl && req.cdpUrl.trim()) {
+    const cdpUrl = req.cdpUrl.trim();
+    const sessionId = makeSessionId("connect");
+    const sessions = readSessions(sessionsPath);
+    sessions[sessionId] = {
+      sessionId,
+      mode: "connect",
+      cdpUrl,
+      userDataDir: "",
+      profileDirectory: "",
+      startedAt: new Date().toISOString(),
+    };
+    writeSessions(sessionsPath, sessions);
+
+    fileLog("handle.browserLaunch.connect", { sessionId, cdpUrl });
+    return {
+      protocol: "agent-browser.plugin.v1",
+      success: true,
+      browser: {
+        cdpUrl,
+        directPage: false,
+        metadata: { mode: "connect", sessionId },
+        cleanup: { sessionId },
+      },
+    };
+  }
+
   const source = resolvePath(
     req.userDataDir ??
       config.userDataDir ??
@@ -339,74 +574,123 @@ function handleBrowserLaunch(req: BrowserLaunchRequest): CommandRunResponse {
   );
   const force = req.force === true;
 
-  fileLog("handle.browserLaunch.request", {
-    source,
-    profileDirectory,
-    debugDir,
-    force,
-  });
+  fileLog("handle.browserLaunch.request", { source, profileDirectory, debugDir, force });
 
+  // One-time rsync: skip if already synced (state file present) unless force.
   const existing = readState(statePath);
   let synced = false;
-  let skippedReason: string | null = null;
-
   if (existing && !force) {
-    // Already prepared once — the rsync is intentionally NOT re-run on every
-    // call to keep this a one-time operation. Pass force:true to refresh.
-    skippedReason = "already-synced";
-    stderr(`State already exists; skipping rsync (pass force:true to re-sync).`);
+    stderr(`Profile already synced; skipping rsync (pass force:true to re-sync).`);
   } else {
     if (!existsSync(join(source, profileDirectory))) {
-      const err = `Source profile not found: ${join(source, profileDirectory)}`;
-      fileLog("handle.browserLaunch.error", { message: err });
-      throw new Error(err);
+      throw new ProviderError(
+        "profile_not_found",
+        `Source profile not found: ${join(source, profileDirectory)}`
+      );
     }
     syncProfile(join(source, profileDirectory), join(debugDir, profileDirectory));
     synced = true;
+    writeState(
+      { userDataDir: debugDir, profileDirectory, source, syncedAt: new Date().toISOString() },
+      statePath
+    );
   }
 
-  const state: ProfileState = {
+  // Launch Chrome from the synced copy and obtain the CDP URL.
+  const { pid, port, cdpUrl } = await launchChrome({
+    executablePath: req.executablePath,
     userDataDir: debugDir,
     profileDirectory,
-    source,
-    syncedAt: new Date().toISOString(),
-  };
-  writeState(state, statePath);
+    port: req.port,
+    extraArgs: req.args ?? [],
+  });
 
-  const data: Record<string, unknown> = {
+  const sessionId = makeSessionId("launch");
+  const sessions = readSessions(sessionsPath);
+  sessions[sessionId] = {
+    sessionId,
+    mode: "launch",
+    pid,
+    port,
+    cdpUrl,
+    userDataDir: debugDir,
+    profileDirectory,
+    startedAt: new Date().toISOString(),
+  };
+  writeSessions(sessionsPath, sessions);
+
+  const metadata: Record<string, unknown> = {
     userDataDir: debugDir,
     profileDirectory,
     source,
+    mode: "launch",
+    sessionId,
+    port,
+    pid,
     synced,
-    statePath,
   };
-  if (skippedReason) {
-    data["skipped"] = skippedReason;
-  }
 
-  fileLog("handle.browserLaunch.response", data);
-  return { protocol: "agent-browser.plugin.v1", success: true, data };
+  fileLog("handle.browserLaunch.response", { ...metadata, cdpUrl });
+  return {
+    protocol: "agent-browser.plugin.v1",
+    success: true,
+    browser: {
+      cdpUrl,
+      directPage: false,
+      metadata,
+      cleanup: { sessionId },
+    },
+  };
 }
 
 function handleBrowserClose(req: BrowserCloseRequest): CommandRunResponse {
-  fileLog("handle.browserClose.request", { removeDebugDir: req.removeDebugDir === true });
+  fileLog("handle.browserClose.request", {
+    sessionId: req.sessionId,
+    removeDebugDir: req.removeDebugDir === true,
+  });
 
   const config = readConfig();
-  const statePath = getStatePath(config);
-  const state = readState(statePath);
-  const removedState = removeState(statePath);
+  const sessionsPath = getSessionsPath(config);
+  const sessions = readSessions(sessionsPath);
+  const sessionId = req.sessionId;
+  const entry = sessionId ? sessions[sessionId] : undefined;
 
-  let removedDebugDir = false;
-  if (req.removeDebugDir === true && state && existsSync(state.userDataDir)) {
-    rmSync(state.userDataDir, { recursive: true, force: true });
-    removedDebugDir = true;
+  // Idempotent: unknown / already-closed session is a no-op success.
+  if (!sessionId || !entry) {
+    const data = { closed: false, noOp: true };
+    fileLog("handle.browserClose.response", data);
+    return { protocol: "agent-browser.plugin.v1", success: true, data };
   }
 
-  const data: Record<string, unknown> = {
-    closed: true,
-    removedState,
-    removedDebugDir,
-  };
+  let closed = false;
+  if (entry.mode === "launch" && typeof entry.pid === "number") {
+    try {
+      process.kill(entry.pid);
+      closed = true;
+    } catch {
+      // Process already exited.
+    }
+  }
+
+  delete sessions[sessionId];
+  writeSessions(sessionsPath, sessions);
+
+  let removedDebugDir = false;
+  if (req.removeDebugDir === true && entry.userDataDir && existsSync(entry.userDataDir)) {
+    rmSync(entry.userDataDir, { recursive: true, force: true });
+    removedDebugDir = true;
+    // Drop the sync marker so the next launch re-syncs into a fresh dir.
+    removeState(getStatePath(config));
+  }
+
+  // connect mode never owned a process — report a no-op close.
+  if (entry.mode === "connect") {
+    const data = { closed: false, noOp: true, removedDebugDir };
+    fileLog("handle.browserClose.response", data);
+    return { protocol: "agent-browser.plugin.v1", success: true, data };
+  }
+
+  const data = { closed, removedDebugDir };
   fileLog("handle.browserClose.response", data);
   return { protocol: "agent-browser.plugin.v1", success: true, data };
 }
@@ -423,7 +707,7 @@ function makeError(code: string, message: string): PluginErrorResponse {
 
 // ─── Request Dispatch ─────────────────────────────────────────────────────────
 
-function dispatch(envelope: PluginEnvelope): PluginResponse {
+function dispatch(envelope: PluginEnvelope): Promise<PluginResponse> | PluginResponse {
   const isOfficial = envelope.protocol === "agent-browser.plugin.v1";
   const isLegacy = !envelope.protocol;
 
@@ -443,31 +727,24 @@ function dispatch(envelope: PluginEnvelope): PluginResponse {
 
   const request = (envelope.request ?? {}) as Record<string, unknown>;
 
-  try {
-    switch (envelope.type) {
-      case "plugin.manifest":
-        return handleManifest();
+  switch (envelope.type) {
+    case "plugin.manifest":
+      return handleManifest();
 
-      case "browser.launch":
-        return handleBrowserLaunch(request as BrowserLaunchRequest);
+    case "browser.launch":
+      return handleBrowserLaunch(request as BrowserLaunchRequest);
 
-      case "browser.close":
-        return handleBrowserClose(request as BrowserCloseRequest);
+    case "browser.close":
+      return handleBrowserClose(request as BrowserCloseRequest);
 
-      default: {
-        const err = makeError(
-          "unsupported_type",
-          `Unsupported request type: "${String(envelope.type)}". Supported types: plugin.manifest, browser.launch, browser.close.`
-        );
-        fileLog("dispatch.error", err.error);
-        return err;
-      }
+    default: {
+      const err = makeError(
+        "unsupported_type",
+        `Unsupported request type: "${String(envelope.type)}". Supported types: plugin.manifest, browser.launch, browser.close.`
+      );
+      fileLog("dispatch.error", err.error);
+      return err;
     }
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    const err = makeError("command_failed", msg);
-    fileLog("dispatch.error", err.error);
-    return err;
   }
 }
 
@@ -513,12 +790,18 @@ async function main(): Promise<void> {
   }
 
   try {
-    const response = dispatch(envelope);
+    const response = await dispatch(envelope);
     process.stdout.write(JSON.stringify(response) + "\n");
   } catch (e: unknown) {
+    if (e instanceof ProviderError) {
+      fileLog("dispatch.error", { code: e.code, message: e.message });
+      process.stdout.write(JSON.stringify(makeError(e.code, e.message)) + "\n");
+      return;
+    }
     const msg = e instanceof Error ? e.message : String(e);
+    fileLog("dispatch.error", { code: "command_failed", message: msg });
     process.stdout.write(
-      JSON.stringify(makeError("internal_error", `Unhandled error: ${msg}`)) + "\n"
+      JSON.stringify(makeError("command_failed", `Unhandled error: ${msg}`)) + "\n"
     );
   }
 }

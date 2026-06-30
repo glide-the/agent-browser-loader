@@ -10,6 +10,7 @@
       "name": "userprofile-browser",
       "command": "node",
       "args": ["./plugins/agent-browser-plugin-userprofile-browser/dist/index.js"],
-      "capabilities": ["command.run"]    }
+      "capabilities": ["browser.provider"]
+    }
   ]
 }

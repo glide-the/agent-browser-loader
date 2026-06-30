@@ -199,9 +199,12 @@
     "metadata": {
       "userDataDir": "/path/to/profile",
       "profileDirectory": "Default",
+      "source": "/path/to/real/profile",
       "mode": "launch",
       "sessionId": "userprofile-launch-12345-1700000000000",
-      "port": 9222
+      "port": 9222,
+      "pid": 92368,
+      "synced": true
     },
     "cleanup": {
       "sessionId": "userprofile-launch-12345-1700000000000"
@@ -225,7 +228,8 @@
   "type": "browser.close",
   "capability": "browser.provider",
   "request": {
-    "sessionId": "userprofile-launch-12345-1700000000000"
+    "sessionId": "userprofile-launch-12345-1700000000000",
+    "removeDebugDir": false
   }
 }
 ```
@@ -236,7 +240,8 @@
   "protocol": "agent-browser.plugin.v1",
   "success": true,
   "data": {
-    "closed": true
+    "closed": true,
+    "removedDebugDir": false
   }
 }
 ```
@@ -263,6 +268,7 @@
 | `parse_error` | JSON 解析失败 |
 | `unsupported_protocol` | `protocol` 字段不是 `agent-browser.plugin.v1` |
 | `unsupported_type` | 不支持的 `type` 值 |
+| `profile_not_found` | 源 `<userDataDir>/<profileDirectory>` 不存在 |
 | `profile_locked` | Chrome Profile 已被锁（SingletonLock） |
 | `chrome_not_found` | 找不到 Chrome/Chromium 可执行文件 |
 | `launch_failed` | Chrome 启动失败 |
