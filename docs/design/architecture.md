@@ -164,7 +164,6 @@ debug userDataDir（启动目录）:
 | 参数 | 作用 |
 |---|---|
 | `--disable-blink-features=AutomationControlled` | 去除 Chromium 自动化控制标志 |
-| `--no-sandbox` | 仅当 `AGENT_BROWSER_STEALTH_NO_SANDBOX=1` 时追加 |
 
 #### initScripts（页面注入脚本）
 

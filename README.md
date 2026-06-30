@@ -47,7 +47,6 @@ Produces `dist/index.js`. The plugin is configured in `agent-browser.json`:
 | `AGENT_BROWSER_STEALTH_EXTENSION` | Single Chrome extension absolute path |
 | `AGENT_BROWSER_STEALTH_EXTENSIONS` | Multiple Chrome extension absolute paths (comma or newline separated) |
 | `AGENT_BROWSER_STEALTH_USER_AGENT` | Override the userAgent string |
-| `AGENT_BROWSER_STEALTH_NO_SANDBOX` | Set to `1` or `true` to add `--no-sandbox` (see Security Risks) |
 
 Chrome **profile** settings (`--user-data-dir` / `--profile-directory`) are NOT read from
 environment variables — agent-browser spawns plugins as subprocesses, so env vars can't be
@@ -191,7 +190,6 @@ The `console.table` and `performance.now` hooks are intentionally small. They ta
 
 | Risk | Details |
 |---|---|
-| `--no-sandbox` | Disabled by default. Enable only via `AGENT_BROWSER_STEALTH_NO_SANDBOX=1`. Reduces browser sandbox isolation — only use in sandboxed CI/container environments. |
 | Stripped default args | The plugin removes `--disable-extensions` and related default switches to match a more normal Chrome shape. Do not use the stealth plugin when those flags are required for isolation. |
 | Stale userAgent | Hardcoded UAs go stale. Always set `AGENT_BROWSER_STEALTH_USER_AGENT` to match your actual platform. |
 | Anti-detection script failure | Sites update detection heuristics frequently. These scripts provide generic minimum coverage and do not guarantee bypass of any specific site's bot detection. |

@@ -82,7 +82,6 @@ SUO-115 要求根据 docs/task/task_112_backend_stealth_launch_mutator.md 实现
 - launch.mutate 只作用于 agent-browser 本地 launch，不会自动修改 --cdp、--auto-connect 或 browser.provider 已经启动好的浏览器。
 - extensions 只能引用本地绝对路径；不存在或相对路径必须给出明确错误或 warning 策略。
 - 不得把 CapSolver API key、cookie、token 或其他密钥写入 agent-browser.json、README 示例或 stdout。
-- --no-sandbox 不应无条件默认开启；如支持，必须通过环境变量或显式配置控制，并在 README 标注风险。
 - userAgent 默认值应保守；优先读取环境变量，避免硬编码过期或平台冲突的 UA。
 - 任何 JSON parse error、unsupported type、配置错误和运行时异常都必须返回 JSON error，不能把错误栈写入 stdout。
 

@@ -54,7 +54,6 @@
    - 保留请求中已有的 `launch.args` 或 `request.args`。
    - 默认追加 `--disable-blink-features=AutomationControlled`。
    - 去重后保持稳定顺序，优先保留调用方已有参数。
-   - `--no-sandbox` 不建议无条件默认开启；为满足 SUO-112 示例，应支持通过环境变量或显式配置启用，并在 README 标注安全风险。
    - 支持 `AGENT_BROWSER_STEALTH_ARGS`，允许用逗号或换行追加额外 Chrome args。
 
 7. 实现 extensions 配置:
@@ -96,7 +95,7 @@
     - 说明 CDP、`--auto-connect` 或 browser.provider 已启动浏览器不会自动叠加该 `launch.mutate`。
     - 说明环境变量: `AGENT_BROWSER_STEALTH_ARGS`、`AGENT_BROWSER_STEALTH_EXTENSION`、`AGENT_BROWSER_STEALTH_EXTENSIONS`、`AGENT_BROWSER_STEALTH_USER_AGENT`。
     - 说明扩展路径必须是本地绝对路径。
-    - 说明 `--no-sandbox`、过期 UA、反检测脚本失效和第三方扩展密钥风险。
+    - 说明过期 UA、反检测脚本失效和第三方扩展密钥风险。
 
 12. 构建与提交:
     - 在插件目录执行 `bun run build`。
@@ -255,7 +254,6 @@ manifest 输出:
 - 当前工作区没有标准 `docs/design/` 和 `docs/issue/` 输入目录；本任务文档使用 Paperclip Issue 描述、SUO-110 任务文档和现有 `docs/*.md` 补足上下文。
 - `launch.mutate` 只对本地 agent-browser launch 生效，不对 `--cdp`、`--auto-connect` 或 `--provider` 已启动浏览器生效。
 - SUO-112 的 NDJSON/id 示例与 SUO-110 记录的官方 envelope 不完全一致，后续实现需要双格式兼容。
-- `--no-sandbox` 会降低浏览器沙箱安全性，除非目标运行环境明确需要，否则不应无条件默认开启。
 - 反检测脚本可能随网站策略变化失效，不应承诺稳定绕过特定站点风控。
 - 第三方验证码扩展依赖外部 API key，密钥不能写入 `agent-browser.json` 或提交到仓库。
 - 过期或平台不匹配的 userAgent 会形成新的指纹异常，应优先通过环境变量配置。

@@ -77,7 +77,6 @@ agent-browser 以子进程方式拉起插件，环境变量无法可靠传入子
 - [ ] 验证 userprofile-browser 插件在真实 BOSS 直聘场景下的效果
 - [ ] 验证 userprofile-browser（command.run 同步）+ stealth（launch.mutate 注入）协同在真实站点的效果
 - [ ] 集成 CapSolver 扩展（需要配置 API Key）
-- [ ] 考虑将 `--no-sandbox` 场景下的沙盒替代方案（Docker 容器隔离）
 
 ---
 

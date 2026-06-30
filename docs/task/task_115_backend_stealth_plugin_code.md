@@ -78,7 +78,6 @@
    - 默认追加 `--disable-blink-features=AutomationControlled`。
    - 去重后保持稳定顺序，优先保留调用方已有参数。
    - 支持 `AGENT_BROWSER_STEALTH_ARGS` 追加额外 Chrome args，允许用逗号或换行分隔。
-   - 不无条件默认加入 `--no-sandbox`；如支持，必须通过环境变量或显式配置开启，并在 README 标注安全风险。
 
 9. 实现 extensions 配置：
    - 默认返回 `extensions: []`。
@@ -118,7 +117,7 @@
     - 说明 CDP、`--auto-connect` 或 browser.provider 已启动浏览器不会自动叠加该 `launch.mutate`。
     - 说明环境变量：`AGENT_BROWSER_STEALTH_ARGS`、`AGENT_BROWSER_STEALTH_EXTENSION`、`AGENT_BROWSER_STEALTH_EXTENSIONS`、`AGENT_BROWSER_STEALTH_USER_AGENT`。
     - 说明扩展路径必须是本地绝对路径。
-    - 说明 `--no-sandbox`、过期 UA、反检测脚本失效和第三方扩展密钥风险。
+    - 说明过期 UA、反检测脚本失效和第三方扩展密钥风险。
 
 14. 构建、验证与提交：
     - 在 `plugins/agent-browser-plugin-stealth/` 执行 `bun run build`。
