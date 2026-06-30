@@ -70,3 +70,4 @@ capsolver-extension/assets/config.js
 # Auth / session files with sensitive credentials
 my-auth.json
 *-auth.json
+.agent-browser/userprofile-browser-sessions.json
