@@ -19,9 +19,14 @@ agent-browser CLI
   ├─ --provider <name>     →  browser.provider 插件 (提供 cdpUrl)
   │      └── cloud-browser 等远程/外部浏览器 provider
   │
+  ├─ plugin run <name>     →  command.run 插件 (一次性准备工作)
+  │      └── agent-browser-plugin-userprofile-browser
+  │            browser.launch: rsync 同步 Profile → RemoteDebug 目录，持久化 launch 目录
+  │            browser.close : 清理持久化状态
+  │
   ├─ 本地 launch 路径        →  launch.mutate 插件 (注入 args/extensions/initScripts/profile)
   │      └── agent-browser-plugin-stealth
-  │            （合并了原 agent-browser-plugin-userprofile-browser 的 Profile 注入）
+  │            读取 userprofile-browser 持久化的 user-data-dir，注入 stealth 参数
   │
   └─ agent-browser.json     →  插件注册表
 ```
@@ -80,48 +85,61 @@ agent-browser CLI
 
 ---
 
-## 插件：agent-browser-plugin-stealth（含 Profile 注入）
+## 插件一：agent-browser-plugin-userprofile-browser（command.run）
 
-> 原 `agent-browser-plugin-userprofile-browser` 已合并进本插件。二者同为 `launch.mutate`，现统一为单个插件。
+> 该插件负责 Profile 准备。rsync 重同步过去被放在 stealth 的 `launch.mutate` 里，会在每次本地启动时阻塞；现拆分为 `command.run`，变成显式的一次性操作。
 
-### Profile 注入职责
+### 职责
 
-`launch.mutate` 插件 — 在 agent-browser 本地启动 Chrome 前注入真实 Chrome Profile 参数。
+`command.run` 插件 — 通过 `agent-browser plugin run userprofile-browser <type>` 调用，支持 `browser.launch` / `browser.close` 两种请求类型，响应字段为 `data`。
 
 ### 核心流程
 
 ```
-launch.mutate 请求
+plugin run userprofile-browser browser.launch
   │
-  ├─ 读取 request.args / extensions / initScripts / userAgent
-  ├─ 解析 userDataDir / profileDirectory
-  ├─ 保留调用方已有参数
-  ├─ 追加缺失的 --user-data-dir / --profile-directory / no-first-run 参数
-  └─ 返回 { launch: { args, extensions, initScripts, userAgent } }
+  ├─ 解析 source userDataDir / profileDirectory / debugDir
+  ├─ 若状态文件已存在且未 force：跳过 rsync（保证“只同步一次”）
+  ├─ 否则 rsync 同步 source/<profile>/ → debug/<profile>/（排除 lock/log/journal/cache）
+  ├─ 写入状态文件 { userDataDir, profileDirectory, source, syncedAt }
+  └─ 返回 { data: { userDataDir, profileDirectory, synced, statePath } }
+
+plugin run userprofile-browser browser.close
+  └─ 删除状态文件（removeDebugDir:true 时一并删除 debug 目录）
 ```
 
-### Profile 解析优先级
+### 路径解析与状态文件
+
+> agent-browser 以子进程方式拉起插件，环境变量无法可靠传入，因此配置改为读取本地文件
+> `<cwd>/.agent-browser/userprofile.config.json`（与 stealth 共享）。env 变量仅作为兜底。
 
 ```
-userDataDir:
+配置文件 .agent-browser/userprofile.config.json:
+  { userDataDir?, profileDirectory?, debugDir?, statePath? }
+
+source userDataDir:
   1. request.userDataDir
-  2. AGENT_BROWSER_USERPROFILE_DIR (env)
-  3. 平台默认:
-     - macOS: ~/Library/Application Support/Google/Chrome
-     - Linux: ${XDG_CONFIG_HOME:-~/.config}/google-chrome（chromium 回退）
+  2. 配置文件 userDataDir
+  3. AGENT_BROWSER_USERPROFILE_DIR / _NAME (env，兜底)
+  4. 平台默认（macOS: ~/Library/Application Support/Google/Chrome；Linux: 同上）
 
-profileDirectory:
-  1. request.profileDirectory
-  2. AGENT_BROWSER_PROFILE_DIRECTORY (env)
-  3. 默认: "Default"
+debug userDataDir（启动目录）:
+  1. request.debugDir
+  2. 配置文件 debugDir
+  3. AGENT_BROWSER_USERPROFILE_DEBUG_DIR (env，兜底)
+  4. <source>RemoteDebug 同级目录（macOS: ~/.../Google/ChromeRemoteDebug）
+
+状态文件路径（与 stealth 共享）:
+  配置文件 statePath → AGENT_BROWSER_USERPROFILE_STATE (env，兜底)
+    → <cwd>/.agent-browser/userprofile-browser-state.json
 ```
 
 ### 关键设计决策
 
-- **不用 `browser.provider`**：provider 路径不能和 `--extension` 同用；Profile 复用必须留在本地 launch 管线。
-- **不启动或关闭 Chrome**：插件只返回 launch 变更，Chrome 生命周期由 agent-browser 本地执行器负责。
-- **不删除 Profile 锁**：插件不读取或修复 Chrome Profile 锁文件，避免损坏用户数据。
-- **保留显式参数优先级**：如果调用方已经传入 `--user-data-dir` 或 `--profile-directory`，不覆盖该值。
+- **rsync 只执行一次**：通过 command.run 从 launch.mutate 热路径剖离；状态文件存在则跳过，`force:true` 可重新同步。
+- **绕过 “non-default data directory” 限制**：全量 rsync 让 RemoteDebug 目录看起来像真实 Profile。
+- **不启动或关闭 Chrome、不删除 Profile 锁**：只同步数据并记录启动目录；rsync 排除锁/日志/journal/cache，即使 Chrome 运行中也能安全拷贝。
+- **不记录敏感数据**：不读取也不记录 cookie / token / Profile 文件内容。
 
 ---
 
@@ -168,9 +186,15 @@ profileDirectory:
 - `AGENT_BROWSER_STEALTH_EXTENSIONS` — 多个扩展绝对路径（逗号或换行分隔）
 - 路径不存在时输出 stderr 警告，不中断启动
 
----
+#### profile 参数（来自 userprofile-browser 状态文件）
 
-## 技术选型
+stealth 在每次 `launch.mutate` 时读取 userprofile-browser 持久化的状态文件，追加缺失的：
+
+- `--user-data-dir=<RemoteDebug 目录>`
+- `--profile-directory=<profile>`
+- `--no-first-run` / `--no-default-browser-check`
+
+解析优先级：`request.userDataDir` > 状态文件 `userDataDir` > 配置文件 `debugDir`/`userDataDir` > `AGENT_BROWSER_USERPROFILE_DIR`(env，兜底) > 平台默认。stealth **不**执行 rsync —— 同步由 userprofile-browser 一次性完成。
 
 | 维度 | 选型 | 理由 |
 |---|---|---|
@@ -199,6 +223,12 @@ bun run build.ts
       "command": "node",
       "args": ["./plugins/agent-browser-plugin-stealth/dist/index.js"],
       "capabilities": ["launch.mutate"]
+    },
+    {
+      "name": "userprofile-browser",
+      "command": "node",
+      "args": ["./plugins/agent-browser-plugin-userprofile-browser/dist/index.js"],
+      "capabilities": ["command.run"]
     }
   ]
 }
@@ -227,5 +257,11 @@ agent-brower/
 │   │   ├── build.ts
 │   │   ├── package.json
 │   │   └── tsconfig.json
+│   └── agent-browser-plugin-userprofile-browser/  # command.run: Profile rsync + 持久化
+│       ├── src/index.ts
+│       ├── dist/index.js
+│       ├── build.ts
+│       ├── package.json
+│       └── tsconfig.json
 └── start-chrome-debug.sh       # 手动 Chrome 启动脚本（遗留）
 ```

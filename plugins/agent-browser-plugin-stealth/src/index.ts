@@ -5,12 +5,10 @@
  *
  * Appends stealth-related Chrome launch args, extensions, initScripts,
  * and userAgent to local Chrome launches via agent-browser, and injects
- * real Chrome user-profile args (--user-data-dir / --profile-directory) so
- * the local launch can reuse a logged-in profile while still loading
- * extensions (which the --provider path cannot do).
- *
- * This plugin merges the former agent-browser-plugin-userprofile-browser
- * plugin; both shared the same launch.mutate capability.
+ * Chrome user-profile args (--user-data-dir / --profile-directory) read from
+ * the state file written by agent-browser-plugin-userprofile-browser. The
+ * heavy one-time profile rsync lives in that command.run plugin; this plugin
+ * only reads the resolved launch directory so launch.mutate stays fast.
  *
  * Protocol: agent-browser.plugin.v1 (stdin/stdout JSON)
  *
@@ -18,10 +16,9 @@
  * It does NOT modify browsers started via --cdp, --auto-connect, or browser.provider.
  */
 
-import { existsSync, readdirSync, mkdirSync, appendFileSync } from "fs";
-import { resolve, join, dirname, basename } from "path";
+import { existsSync, mkdirSync, appendFileSync, readFileSync } from "fs";
+import { resolve, join } from "path";
 import { homedir, platform } from "os";
-import { spawnSync } from "child_process";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -74,15 +71,10 @@ interface LaunchMutateRequest {
 }
 
 interface ProfileConfig {
-  // Real Chrome user-data-dir holding the logged-in profile. Used as the rsync
-  // source, never passed to Chrome directly (that triggers Chrome's
-  // "non-default data directory" restriction and profile-lock conflicts).
-  sourceUserDataDir: string;
-  // Separate copy used as the launched --user-data-dir.
-  debugUserDataDir: string;
+  // user-data-dir passed to Chrome. Prefers the RemoteDebug dir persisted by
+  // agent-browser-plugin-userprofile-browser; falls back to env/request/default.
+  userDataDir: string;
   profileDirectory: string;
-  // When true, rsync-sync the source profile into the debug dir before launch.
-  syncProfile: boolean;
 }
 
 interface LaunchMutateResponse extends PluginSuccessResponse {
@@ -242,15 +234,6 @@ function getStealthArgs(existingArgs: string[]): string[] {
     stderr(`Stripped automation/default Chrome args: ${strippedArgs.join(", ")}`);
   }
 
-  // Check for --no-sandbox via env var
-  const noSandboxEnv = process.env["AGENT_BROWSER_STEALTH_NO_SANDBOX"];
-  if (noSandboxEnv === "1" || noSandboxEnv === "true") {
-    stderr(
-      "WARNING: --no-sandbox enabled via AGENT_BROWSER_STEALTH_NO_SANDBOX. This reduces browser security."
-    );
-    addUnique(args, "--no-sandbox");
-  }
-
   // Extra args from env var (comma or newline separated)
   const extraArgsEnv = process.env["AGENT_BROWSER_STEALTH_ARGS"];
   if (extraArgsEnv) {
@@ -267,7 +250,13 @@ function getStealthArgs(existingArgs: string[]): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// Chrome user profile (merged from agent-browser-plugin-userprofile-browser)
+// Chrome user profile
+//
+// The heavy lifting — rsync-syncing the real Chrome profile into a separate
+// "RemoteDebug" user-data-dir — now lives in the
+// agent-browser-plugin-userprofile-browser command.run plugin. This plugin only
+// READS the launch directory that plugin persisted, so launch.mutate stays fast
+// and the sync runs once instead of blocking every launch.
 // ---------------------------------------------------------------------------
 
 function getDefaultUserDataDir(): string {
@@ -290,173 +279,99 @@ function getDefaultUserDataDir(): string {
   return googleChrome;
 }
 
-// Debug copy lives next to the real Chrome data dir, mirroring
-// start-chrome-debug.sh's ~/.../Google/ChromeRemoteDebug convention.
-function getDefaultDebugDataDir(sourceUserDataDir: string): string {
-  return join(
-    dirname(sourceUserDataDir),
-    `${basename(sourceUserDataDir)}RemoteDebug`
-  );
+interface PersistedProfileState {
+  userDataDir?: string;
+  profileDirectory?: string;
 }
 
-function isFalsyEnv(value: string | undefined): boolean {
-  return value === "0" || value === "false";
+// ---------------------------------------------------------------------------
+// Local config file
+//
+// agent-browser spawns plugins as subprocesses, so environment variables can't
+// be relied on to reach them. Profile configuration is read from a local JSON
+// file shared with agent-browser-plugin-userprofile-browser. Env vars remain
+// only as an optional last-resort fallback.
+// ---------------------------------------------------------------------------
+
+interface UserProfileConfig {
+  userDataDir?: string;
+  profileDirectory?: string;
+  debugDir?: string;
+  statePath?: string;
+}
+
+function getConfigPath(): string {
+  return join(process.cwd(), ".agent-browser", "userprofile.config.json");
+}
+
+function readConfig(): UserProfileConfig {
+  const configPath = getConfigPath();
+  if (!existsSync(configPath)) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, "utf8")) as unknown;
+    if (parsed && typeof parsed === "object") {
+      return parsed as UserProfileConfig;
+    }
+  } catch {
+    stderr(`Failed to parse config at ${configPath}; ignoring.`);
+  }
+  return {};
+}
+
+// Path of the state file written by agent-browser-plugin-userprofile-browser.
+// Must match that plugin's getStatePath(): config.statePath > env > default.
+function getStatePath(config: UserProfileConfig): string {
+  const chosen = config.statePath ?? process.env["AGENT_BROWSER_USERPROFILE_STATE"];
+  if (chosen && chosen.trim()) {
+    return resolvePath(chosen.trim());
+  }
+  return join(process.cwd(), ".agent-browser", "userprofile-browser-state.json");
+}
+
+function readPersistedProfileState(statePath: string): PersistedProfileState | null {
+  if (!existsSync(statePath)) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(statePath, "utf8")) as PersistedProfileState;
+    if (typeof parsed.userDataDir === "string" && parsed.userDataDir.trim()) {
+      return parsed;
+    }
+  } catch {
+    stderr(`Failed to parse userprofile state at ${statePath}; ignoring.`);
+  }
+  return null;
 }
 
 function resolveProfileConfig(req: LaunchMutateRequest): ProfileConfig {
-  const envDir =
+  const config = readConfig();
+  const state = readPersistedProfileState(getStatePath(config));
+
+  // Priority: explicit request > persisted state (the synced RemoteDebug dir) >
+  // config debugDir/userDataDir > env (last-resort) > platform default. The
+  // persisted state is the directory the userprofile-browser plugin prepared,
+  // so it is preferred over the live Chrome dir default.
+  const rawDir =
+    req.userDataDir ??
+    state?.userDataDir ??
+    config.debugDir ??
+    config.userDataDir ??
     process.env["AGENT_BROWSER_USERPROFILE_DIR"] ??
-    process.env["AGENT_BROWSER_USERPROFILE_NAME"];
-  const envProfileDir = process.env["AGENT_BROWSER_PROFILE_DIRECTORY"];
-  const envDebugDir = process.env["AGENT_BROWSER_USERPROFILE_DEBUG_DIR"];
-
-  const rawDir = req.userDataDir ?? envDir ?? getDefaultUserDataDir();
-  const rawProfileDir = req.profileDirectory ?? envProfileDir ?? "Default";
-
-  const sourceUserDataDir = resolvePath(rawDir);
-  const debugUserDataDir = resolvePath(
-    envDebugDir ?? getDefaultDebugDataDir(sourceUserDataDir)
-  );
-
-  // Sync is on by default (mirrors start-chrome-debug.sh). Disable with
-  // AGENT_BROWSER_USERPROFILE_SYNC=0 to point --user-data-dir at the source dir.
-  const syncProfile = !isFalsyEnv(process.env["AGENT_BROWSER_USERPROFILE_SYNC"]);
+    process.env["AGENT_BROWSER_USERPROFILE_NAME"] ??
+    getDefaultUserDataDir();
+  const rawProfileDir =
+    req.profileDirectory ??
+    state?.profileDirectory ??
+    config.profileDirectory ??
+    process.env["AGENT_BROWSER_PROFILE_DIRECTORY"] ??
+    "Default";
 
   return {
-    sourceUserDataDir,
-    debugUserDataDir,
+    userDataDir: resolvePath(rawDir),
     profileDirectory: rawProfileDir,
-    syncProfile,
   };
-}
-
-// ---------------------------------------------------------------------------
-// Profile sync (mirrors start-chrome-debug.sh)
-//
-// rsync-syncs the real Chrome profile into a separate debug user-data-dir so an
-// automated launch can reuse a logged-in profile without hitting Chrome's
-// "non-default data directory" restriction or the live profile lock. Lock,
-// log, journal and cache files are excluded so the copy is safe even while the
-// real Chrome is running.
-// ---------------------------------------------------------------------------
-
-const RSYNC_PROFILE_EXCLUDES = [
-  "LOCK",
-  "LOG",
-  "LOG.old",
-  "SingletonLock",
-  "SingletonCookie",
-  "SingletonSocket",
-  "CrashpadMetrics*",
-  "*-journal",
-  "*-wal",
-  "*-shm",
-  "GPUCache/",
-  "DawnGraphiteCache/",
-  "DawnWebGPUCache/",
-  "ShaderCache/",
-  "Code Cache/",
-];
-
-/**
- * Returns the user-data-dir that should be passed to Chrome: the synced debug
- * dir on success, or the source dir as a fallback when rsync is unavailable.
- */
-function syncProfileToDebugDir(profile: ProfileConfig): string {
-  const srcProfile = join(profile.sourceUserDataDir, profile.profileDirectory);
-  const dstProfile = join(profile.debugUserDataDir, profile.profileDirectory);
-
-  // Safety guard: never rsync onto the source itself. With --delete this could
-  // remove files from the real Chrome profile. If the debug dir resolves to the
-  // source dir, skip the copy and use the source directly.
-  if (profile.debugUserDataDir === profile.sourceUserDataDir) {
-    stderr(
-      `Debug dir equals source dir (${profile.sourceUserDataDir}); ` +
-        `skipping profile sync to avoid mutating the real profile.`
-    );
-    fileLog("profile.sync.skip", {
-      reason: "debug_equals_source",
-      dir: profile.sourceUserDataDir,
-    });
-    return profile.sourceUserDataDir;
-  }
-
-  if (!existsSync(srcProfile)) {
-    stderr(
-      `Source profile not found, skipping profile sync: ${srcProfile}. ` +
-        `Launching with a fresh profile at ${profile.debugUserDataDir}.`
-    );
-    fileLog("profile.sync.skip", { reason: "source_missing", srcProfile });
-    return profile.debugUserDataDir;
-  }
-
-  try {
-    mkdirSync(dstProfile, { recursive: true });
-  } catch (e) {
-    stderr(
-      `Could not create debug profile dir ${dstProfile}: ${String(e)}. ` +
-        `Falling back to source user-data-dir.`
-    );
-    fileLog("profile.sync.error", { stage: "mkdir", dstProfile, error: String(e) });
-    return profile.sourceUserDataDir;
-  }
-
-  // Trailing slash on the source copies its contents into the destination.
-  const rsyncArgs = [
-    "-a",
-    "--delete",
-    "--ignore-errors",
-    "--partial",
-    ...RSYNC_PROFILE_EXCLUDES.map((p) => `--exclude=${p}`),
-    `${srcProfile}/`,
-    `${dstProfile}/`,
-  ];
-
-  fileLog("profile.sync.start", { srcProfile, dstProfile });
-  const result = spawnSync("rsync", rsyncArgs, {
-    stdio: ["ignore", "ignore", "inherit"],
-  });
-
-  if (result.error) {
-    const code = (result.error as { code?: string }).code;
-    if (code === "ENOENT") {
-      stderr(
-        "rsync not found on PATH; skipping profile sync and falling back to " +
-          "source user-data-dir."
-      );
-      fileLog("profile.sync.error", { stage: "spawn", reason: "rsync_missing" });
-      return profile.sourceUserDataDir;
-    }
-    stderr(
-      `rsync failed to start: ${String(result.error)}. ` +
-        `Falling back to source user-data-dir.`
-    );
-    fileLog("profile.sync.error", { stage: "spawn", error: String(result.error) });
-    return profile.sourceUserDataDir;
-  }
-
-  // rsync exit codes 0/23/24 are acceptable (partial transfer of vanished files).
-  const exitCode = result.status ?? -1;
-  if (exitCode === 0 || exitCode === 23 || exitCode === 24) {
-    stderr(
-      `Profile synced to debug dir: ${profile.debugUserDataDir} (rsync exit ${exitCode}).`
-    );
-    fileLog("profile.sync.done", {
-      debugUserDataDir: profile.debugUserDataDir,
-      exitCode,
-    });
-    return profile.debugUserDataDir;
-  }
-
-  stderr(
-    `rsync exited with code ${exitCode}; using synced debug dir anyway: ` +
-      `${profile.debugUserDataDir}.`
-  );
-  fileLog("profile.sync.warn", {
-    debugUserDataDir: profile.debugUserDataDir,
-    exitCode,
-  });
-  return profile.debugUserDataDir;
 }
 
 function argFlagName(arg: string): string | null {
@@ -475,13 +390,9 @@ function hasArg(args: string[], candidate: string): boolean {
   return args.some((arg) => argFlagName(arg) === candidateFlag);
 }
 
-function appendProfileArgs(
-  existingArgs: string[],
-  userDataDir: string,
-  profile: ProfileConfig
-): string[] {
+function appendProfileArgs(existingArgs: string[], profile: ProfileConfig): string[] {
   const desiredArgs = [
-    `--user-data-dir=${userDataDir}`,
+    `--user-data-dir=${profile.userDataDir}`,
     `--profile-directory=${profile.profileDirectory}`,
     "--no-first-run",
     "--no-default-browser-check",
@@ -1033,7 +944,7 @@ function handleManifest(): PluginManifestResponse {
       name: "agent-browser-plugin-stealth",
       capabilities: ["launch.mutate"],
       description:
-        "Append local Chrome launch args, extensions, init scripts, userAgent overrides, and real user-profile args (--user-data-dir/--profile-directory) for stealth automation.",
+        "Append local Chrome launch args, extensions, init scripts, userAgent overrides, and user-profile args (--user-data-dir/--profile-directory) read from the userprofile-browser state file, for stealth automation.",
     },
   };
   fileLog("handle.manifest.response", { manifest: resp.manifest });
@@ -1049,15 +960,12 @@ function handleLaunchMutate(req: LaunchMutateRequest): LaunchMutateResponse {
     initScriptsCount: (req.initScripts ?? []).length,
     hasUserAgent: Boolean(req.userAgent),
     profileDirectory: profile.profileDirectory,
-    syncProfile: profile.syncProfile,
+    userDataDir: profile.userDataDir,
   });
 
   const existingArgs = req.args ?? [];
   const stealthArgs = getStealthArgs(existingArgs);
-  const effectiveUserDataDir = profile.syncProfile
-    ? syncProfileToDebugDir(profile)
-    : profile.sourceUserDataDir;
-  const args = appendProfileArgs(stealthArgs, effectiveUserDataDir, profile);
+  const args = appendProfileArgs(stealthArgs, profile);
   const extensions = getExtensions(req.extensions ?? []);
   const initScripts = Array.from(new Set([...(req.initScripts ?? []), ...INIT_SCRIPTS]));
   const userAgent = getUserAgent(req.userAgent);
@@ -1074,8 +982,8 @@ function handleLaunchMutate(req: LaunchMutateRequest): LaunchMutateResponse {
   };
 
   fileLog("handle.launchMutate.response", {
-    argsCount: args,
-    extensionsCount: extensions,
+    argsCount: args.length,
+    extensionsCount: extensions.length,
     initScriptsCount: initScripts.length,
     userAgent: userAgent || "(none)",
     profileDirectory: profile.profileDirectory,

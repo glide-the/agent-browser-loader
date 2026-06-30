@@ -1,0 +1,15 @@
+{
+  "name": "agent-browser-plugin-userprofile-browser",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "agent-browser-plugin-userprofile-browser": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "bun run build.ts"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
