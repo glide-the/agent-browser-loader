@@ -4,7 +4,13 @@
  * launch.mutate plugin for agent-browser
  *
  * Appends stealth-related Chrome launch args, extensions, initScripts,
- * and userAgent to local Chrome launches via agent-browser.
+ * and userAgent to local Chrome launches via agent-browser, and injects
+ * real Chrome user-profile args (--user-data-dir / --profile-directory) so
+ * the local launch can reuse a logged-in profile while still loading
+ * extensions (which the --provider path cannot do).
+ *
+ * This plugin merges the former agent-browser-plugin-userprofile-browser
+ * plugin; both shared the same launch.mutate capability.
  *
  * Protocol: agent-browser.plugin.v1 (stdin/stdout JSON)
  *
@@ -14,7 +20,7 @@
 
 import { existsSync, readdirSync, mkdirSync, appendFileSync } from "fs";
 import { resolve, join } from "path";
-import { homedir } from "os";
+import { homedir, platform } from "os";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -27,7 +33,7 @@ interface PluginEnvelope<TRequest = unknown> {
   request?: TRequest;
   id?: string;
   // Legacy issue format
-  launch?: { args?: string[] };
+  launch?: Partial<LaunchMutateRequest>;
 }
 
 interface PluginSuccessResponse {
@@ -62,6 +68,13 @@ interface LaunchMutateRequest {
   extensions?: string[];
   initScripts?: string[];
   userAgent?: string;
+  userDataDir?: string;
+  profileDirectory?: string;
+}
+
+interface ProfileConfig {
+  userDataDir: string;
+  profileDirectory: string;
 }
 
 interface LaunchMutateResponse extends PluginSuccessResponse {
@@ -243,6 +256,78 @@ function getStealthArgs(existingArgs: string[]): string[] {
   }
 
   return addAutomationControlledFeature(args);
+}
+
+// ---------------------------------------------------------------------------
+// Chrome user profile (merged from agent-browser-plugin-userprofile-browser)
+// ---------------------------------------------------------------------------
+
+function getDefaultUserDataDir(): string {
+  const plat = platform();
+  if (plat === "darwin") {
+    return expandHome("~/Library/Application Support/Google/Chrome");
+  }
+
+  const xdgConfig = process.env["XDG_CONFIG_HOME"] ?? expandHome("~/.config");
+  const googleChrome = join(xdgConfig, "google-chrome");
+  if (existsSync(googleChrome)) {
+    return googleChrome;
+  }
+
+  const chromium = join(xdgConfig, "chromium");
+  if (existsSync(chromium)) {
+    return chromium;
+  }
+
+  return googleChrome;
+}
+
+function resolveProfileConfig(req: LaunchMutateRequest): ProfileConfig {
+  const envDir =
+    process.env["AGENT_BROWSER_USERPROFILE_DIR"] ??
+    process.env["AGENT_BROWSER_USERPROFILE_NAME"];
+  const envProfileDir = process.env["AGENT_BROWSER_PROFILE_DIRECTORY"];
+
+  const rawDir = req.userDataDir ?? envDir ?? getDefaultUserDataDir();
+  const rawProfileDir = req.profileDirectory ?? envProfileDir ?? "Default";
+
+  return {
+    userDataDir: resolvePath(rawDir),
+    profileDirectory: rawProfileDir,
+  };
+}
+
+function argFlagName(arg: string): string | null {
+  if (!arg.startsWith("--")) {
+    return null;
+  }
+  const eqIndex = arg.indexOf("=");
+  return eqIndex >= 0 ? arg.slice(0, eqIndex) : arg;
+}
+
+function hasArg(args: string[], candidate: string): boolean {
+  const candidateFlag = argFlagName(candidate);
+  if (!candidateFlag) {
+    return args.includes(candidate);
+  }
+  return args.some((arg) => argFlagName(arg) === candidateFlag);
+}
+
+function appendProfileArgs(existingArgs: string[], profile: ProfileConfig): string[] {
+  const desiredArgs = [
+    `--user-data-dir=${profile.userDataDir}`,
+    `--profile-directory=${profile.profileDirectory}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+  ];
+
+  const args = [...existingArgs];
+  for (const arg of desiredArgs) {
+    if (!hasArg(args, arg)) {
+      args.push(arg);
+    }
+  }
+  return args;
 }
 
 // ---------------------------------------------------------------------------
@@ -782,7 +867,7 @@ function handleManifest(): PluginManifestResponse {
       name: "agent-browser-plugin-stealth",
       capabilities: ["launch.mutate"],
       description:
-        "Append local Chrome launch args, extensions, init scripts, and userAgent overrides for stealth automation.",
+        "Append local Chrome launch args, extensions, init scripts, userAgent overrides, and real user-profile args (--user-data-dir/--profile-directory) for stealth automation.",
     },
   };
   fileLog("handle.manifest.response", { manifest: resp.manifest });
@@ -790,15 +875,19 @@ function handleManifest(): PluginManifestResponse {
 }
 
 function handleLaunchMutate(req: LaunchMutateRequest): LaunchMutateResponse {
+  const profile = resolveProfileConfig(req);
+
   fileLog("handle.launchMutate.request", {
     argsCount: (req.args ?? []).length,
     extensionsCount: (req.extensions ?? []).length,
     initScriptsCount: (req.initScripts ?? []).length,
     hasUserAgent: Boolean(req.userAgent),
+    profileDirectory: profile.profileDirectory,
   });
 
   const existingArgs = req.args ?? [];
-  const args = getStealthArgs(existingArgs);
+  const stealthArgs = getStealthArgs(existingArgs);
+  const args = appendProfileArgs(stealthArgs, profile);
   const extensions = getExtensions(req.extensions ?? []);
   const initScripts = Array.from(new Set([...(req.initScripts ?? []), ...INIT_SCRIPTS]));
   const userAgent = getUserAgent(req.userAgent);
@@ -815,10 +904,11 @@ function handleLaunchMutate(req: LaunchMutateRequest): LaunchMutateResponse {
   };
 
   fileLog("handle.launchMutate.response", {
-    argsCount: args.length,
-    extensionsCount: extensions.length,
+    argsCount: args,
+    extensionsCount: extensions,
     initScriptsCount: initScripts.length,
     userAgent: userAgent || "(none)",
+    profileDirectory: profile.profileDirectory,
   });
 
   return resp;
@@ -854,7 +944,7 @@ function dispatch(envelope: PluginEnvelope): PluginResponse {
       if (isOfficial && envelope.request) {
         req = envelope.request as LaunchMutateRequest;
       } else if (isLegacy && envelope.launch) {
-        req = { args: envelope.launch.args ?? [] };
+        req = envelope.launch as LaunchMutateRequest;
       }
       return handleLaunchMutate(req);
     }

@@ -21,8 +21,7 @@
 
 | 产物 | 类型 | 状态 |
 |---|---|---|
-| `agent-browser-plugin-userprofile-browser` | launch.mutate Profile 参数插件 | ✓ 完成 |
-| `agent-browser-plugin-stealth` | launch.mutate 插件 | ✓ 完成 |
+| `agent-browser-plugin-stealth` | launch.mutate 插件（含 Profile 参数注入，已合并 userprofile-browser） | ✓ 完成 |
 | `agent-browser.json` | 插件注册表 | ✓ 更新 |
 
 ### 文档沉淀（本阶段补充）

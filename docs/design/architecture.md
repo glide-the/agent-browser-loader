@@ -19,9 +19,9 @@ agent-browser CLI
   ├─ --provider <name>     →  browser.provider 插件 (提供 cdpUrl)
   │      └── cloud-browser 等远程/外部浏览器 provider
   │
-  ├─ 本地 launch 路径        →  launch.mutate 插件 (注入 args/extensions/initScripts)
-  │      ├── agent-browser-plugin-stealth
-  │      └── agent-browser-plugin-userprofile-browser
+  ├─ 本地 launch 路径        →  launch.mutate 插件 (注入 args/extensions/initScripts/profile)
+  │      └── agent-browser-plugin-stealth
+  │            （合并了原 agent-browser-plugin-userprofile-browser 的 Profile 注入）
   │
   └─ agent-browser.json     →  插件注册表
 ```
@@ -80,9 +80,11 @@ agent-browser CLI
 
 ---
 
-## 插件一：agent-browser-plugin-userprofile-browser
+## 插件：agent-browser-plugin-stealth（含 Profile 注入）
 
-### 职责
+> 原 `agent-browser-plugin-userprofile-browser` 已合并进本插件。二者同为 `launch.mutate`，现统一为单个插件。
+
+### Profile 注入职责
 
 `launch.mutate` 插件 — 在 agent-browser 本地启动 Chrome 前注入真实 Chrome Profile 参数。
 
@@ -125,7 +127,7 @@ profileDirectory:
 
 ## 插件二：agent-browser-plugin-stealth
 
-### 职责
+### Stealth 注入职责
 
 `launch.mutate` 插件 — 在 agent-browser 本地启动 Chrome 前，注入 stealth 相关的参数、扩展和页面脚本。
 
@@ -197,12 +199,6 @@ bun run build.ts
       "command": "node",
       "args": ["./plugins/agent-browser-plugin-stealth/dist/index.js"],
       "capabilities": ["launch.mutate"]
-    },
-    {
-      "name": "agent-browser-plugin-userprofile-browser",
-      "command": "node",
-      "args": ["./plugins/agent-browser-plugin-userprofile-browser/dist/index.js"],
-      "capabilities": ["launch.mutate"]
     }
   ]
 }
@@ -231,11 +227,5 @@ agent-brower/
 │   │   ├── build.ts
 │   │   ├── package.json
 │   │   └── tsconfig.json
-│   └── agent-browser-plugin-userprofile-browser/
-│       ├── src/index.ts
-│       ├── dist/index.js
-│       ├── build.ts
-│       ├── package.json
-│       └── tsconfig.json
 └── start-chrome-debug.sh       # 手动 Chrome 启动脚本（遗留）
 ```

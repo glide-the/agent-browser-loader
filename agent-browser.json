@@ -42,12 +42,6 @@
       "command": "node",
       "args": ["./plugins/agent-browser-plugin-stealth/dist/index.js"],
       "capabilities": ["launch.mutate"]
-    },
-    {
-      "name": "agent-browser-plugin-userprofile-browser",
-      "command": "node",
-      "args": ["./plugins/agent-browser-plugin-userprofile-browser/dist/index.js"],
-      "capabilities": ["launch.mutate"]
     }
   ]
 }

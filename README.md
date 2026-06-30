@@ -8,7 +8,9 @@ This workspace contains local plugins for [agent-browser](https://github.com/age
 
 ## agent-browser-plugin-stealth
 
-A local `launch.mutate` plugin that appends stealth-related Chrome launch arguments, extensions, initScripts, and a custom userAgent to agent-browser local launches.
+A local `launch.mutate` plugin that appends stealth-related Chrome launch arguments, extensions, initScripts, and a custom userAgent to agent-browser local launches. It also injects real Chrome user-profile args (`--user-data-dir` / `--profile-directory`) so a logged-in profile can be reused on the local launch path while still loading extensions.
+
+> This plugin merges the former `agent-browser-plugin-userprofile-browser` plugin. Both shared the `launch.mutate` capability, so they are now a single plugin.
 
 ### Scope and Limitations
 
@@ -17,8 +19,7 @@ A local `launch.mutate` plugin that appends stealth-related Chrome launch argume
 - Browsers started via `--auto-connect`
 - Browsers provided by a `browser.provider` plugin (e.g. cloud-browser)
 
-If you need stealth args when using a `browser.provider`, pass them explicitly in the `browser.launch` request `args` field.
-`agent-browser-plugin-userprofile-browser` is also a `launch.mutate` plugin now, so it shares the local launch pipeline and can be used together with `--extension`.
+If you need stealth args when using a `browser.provider`, pass them explicitly in the `browser.launch` request `args` field. Because profile injection now runs on the same `launch.mutate` pipeline, it can be used together with `--extension`.
 
 ### Build
 
@@ -47,6 +48,8 @@ Produces `dist/index.js`. The plugin is configured in `agent-browser.json`:
 | `AGENT_BROWSER_STEALTH_EXTENSIONS` | Multiple Chrome extension absolute paths (comma or newline separated) |
 | `AGENT_BROWSER_STEALTH_USER_AGENT` | Override the userAgent string |
 | `AGENT_BROWSER_STEALTH_NO_SANDBOX` | Set to `1` or `true` to add `--no-sandbox` (see Security Risks) |
+| `AGENT_BROWSER_USERPROFILE_DIR` | Chrome user data dir for `--user-data-dir` (also `AGENT_BROWSER_USERPROFILE_NAME`) |
+| `AGENT_BROWSER_PROFILE_DIRECTORY` | Chrome profile name for `--profile-directory` (default `Default`) |
 
 **Extension paths must be absolute.** Relative paths or non-existent paths produce a warning on stderr; the extension is skipped rather than silently misconfigured.
 
@@ -83,7 +86,7 @@ Response:
   "manifest": {
     "name": "agent-browser-plugin-stealth",
     "capabilities": ["launch.mutate"],
-    "description": "Append local Chrome launch args, extensions, init scripts, and userAgent overrides for stealth automation."
+    "description": "Append local Chrome launch args, extensions, init scripts, userAgent overrides, and real user-profile args (--user-data-dir/--profile-directory) for stealth automation."
   }
 }
 ```
