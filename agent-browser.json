@@ -47,7 +47,7 @@
       "name": "agent-browser-plugin-userprofile-browser",
       "command": "node",
       "args": ["./plugins/agent-browser-plugin-userprofile-browser/dist/index.js"],
-      "capabilities": ["browser.provider"]
+      "capabilities": ["launch.mutate"]
     }
   ]
 }

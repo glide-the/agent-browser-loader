@@ -12,8 +12,8 @@
  * It does NOT modify browsers started via --cdp, --auto-connect, or browser.provider.
  */
 
-import { existsSync, readdirSync } from "fs";
-import { resolve } from "path";
+import { existsSync, readdirSync, mkdirSync, appendFileSync } from "fs";
+import { resolve, join } from "path";
 import { homedir } from "os";
 
 // ---------------------------------------------------------------------------
@@ -85,6 +85,32 @@ type PluginResponse =
 
 function stderr(msg: string): void {
   process.stderr.write(`[agent-browser-plugin-stealth] ${msg}\n`);
+}
+
+// ---------------------------------------------------------------------------
+// File logger — writes JSON-lines to logs/agent-browser-plugin-stealth.log
+// under the CWD (agent-browser run directory).
+// ---------------------------------------------------------------------------
+
+const LOG_DIR = join(process.cwd(), "logs");
+const LOG_FILE = join(LOG_DIR, "agent-browser-plugin-stealth.log");
+
+function fileLog(event: string, data?: unknown): void {
+  try {
+    if (!existsSync(LOG_DIR)) {
+      mkdirSync(LOG_DIR, { recursive: true });
+    }
+    const entry = JSON.stringify({
+      ts: new Date().toISOString(),
+      plugin: "agent-browser-plugin-stealth",
+      event,
+      ...(data !== undefined ? { data } : {}),
+    });
+    appendFileSync(LOG_FILE, entry + "\n");
+  } catch {
+    // never throw from logger — only fall back to stderr
+    stderr(`[fileLog error] could not write to ${LOG_FILE}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -294,15 +320,91 @@ const INIT_SCRIPTS: string[] = [
         try { target[prop] = value; } catch (_) {}
       }
     };
+    var nativeFunctionToString = Function.prototype.toString;
+    var nativeSourceMap = typeof WeakMap === 'function' ? new WeakMap() : null;
+    var registerNativeSource = function(fn, source) {
+      try {
+        if (nativeSourceMap && typeof fn === 'function') {
+          nativeSourceMap.set(fn, source);
+        }
+      } catch (e) {}
+    };
+    try {
+      var patchedToString = function toString() {
+        if (nativeSourceMap && nativeSourceMap.has(this)) {
+          return nativeSourceMap.get(this);
+        }
+        return nativeFunctionToString.call(this);
+      };
+      Object.defineProperty(patchedToString, '__agentBrowserStealthPatched', { value: true });
+      registerNativeSource(patchedToString, nativeFunctionToString.call(nativeFunctionToString));
+      Object.defineProperty(Function.prototype, 'toString', {
+        value: patchedToString,
+        writable: true,
+        configurable: true
+      });
+    } catch (e) {}
     var asNative = function(fn, name) {
+      var source = 'function ' + name + '() { [native code] }';
+      registerNativeSource(fn, source);
       try {
         Object.defineProperty(fn, 'toString', {
-          value: function() { return 'function ' + name + '() { [native code] }'; },
+          value: function() { return source; },
           configurable: true
         });
       } catch (e) {}
       return fn;
     };
+    var replaceMethod = function(target, prop, fn) {
+      try {
+        var descriptor = Object.getOwnPropertyDescriptor(target, prop);
+        if (descriptor && descriptor.configurable !== false) {
+          Object.defineProperty(target, prop, {
+            value: fn,
+            writable: descriptor.writable !== false,
+            enumerable: descriptor.enumerable,
+            configurable: descriptor.configurable
+          });
+        } else {
+          target[prop] = fn;
+        }
+      } catch (e) {
+        try { target[prop] = fn; } catch (_) {}
+      }
+    };
+
+    // console.table/performance.now timing probes used by devtools detectors.
+    // performance.now must be strictly increasing; some detectors treat t1 === t2
+    // as proof that now() was hooked and then trigger destructive branches.
+    try {
+      if (window.console && typeof console.table === 'function' && !console.table.__agentBrowserStealthAntiDebugPatched) {
+        var table = function table() {};
+        Object.defineProperty(table, '__agentBrowserStealthAntiDebugPatched', { value: true });
+        replaceMethod(console, 'table', asNative(table, 'table'));
+      }
+    } catch (e) {}
+    try {
+      if (window.performance && typeof performance.now === 'function' && !performance.now.__agentBrowserStealthAntiDebugPatched) {
+        var navStart = typeof performance.timeOrigin === 'number'
+          ? performance.timeOrigin
+          : (performance.timing && performance.timing.navigationStart) || Date.now();
+        var lastMonotonicPerformanceNow = 0;
+        var minimumMonotonicStepMs = 0.001;
+        var now = function now() {
+          var elapsed = Date.now() - navStart;
+          if (!isFinite(elapsed)) {
+            elapsed = 0;
+          }
+          if (elapsed <= lastMonotonicPerformanceNow) {
+            elapsed = lastMonotonicPerformanceNow + minimumMonotonicStepMs;
+          }
+          lastMonotonicPerformanceNow = elapsed;
+          return elapsed;
+        };
+        Object.defineProperty(now, '__agentBrowserStealthAntiDebugPatched', { value: true });
+        replaceMethod(performance, 'now', asNative(now, 'now'));
+      }
+    } catch (e) {}
 
     // navigator.webdriver
     try {
@@ -672,7 +774,8 @@ function getUserAgent(existingUserAgent?: string): string {
 // ---------------------------------------------------------------------------
 
 function handleManifest(): PluginManifestResponse {
-  return {
+  fileLog("handle.manifest");
+  const resp: PluginManifestResponse = {
     protocol: "agent-browser.plugin.v1",
     success: true,
     manifest: {
@@ -682,16 +785,25 @@ function handleManifest(): PluginManifestResponse {
         "Append local Chrome launch args, extensions, init scripts, and userAgent overrides for stealth automation.",
     },
   };
+  fileLog("handle.manifest.response", { manifest: resp.manifest });
+  return resp;
 }
 
 function handleLaunchMutate(req: LaunchMutateRequest): LaunchMutateResponse {
+  fileLog("handle.launchMutate.request", {
+    argsCount: (req.args ?? []).length,
+    extensionsCount: (req.extensions ?? []).length,
+    initScriptsCount: (req.initScripts ?? []).length,
+    hasUserAgent: Boolean(req.userAgent),
+  });
+
   const existingArgs = req.args ?? [];
   const args = getStealthArgs(existingArgs);
   const extensions = getExtensions(req.extensions ?? []);
   const initScripts = Array.from(new Set([...(req.initScripts ?? []), ...INIT_SCRIPTS]));
   const userAgent = getUserAgent(req.userAgent);
 
-  return {
+  const resp: LaunchMutateResponse = {
     protocol: "agent-browser.plugin.v1",
     success: true,
     launch: {
@@ -701,6 +813,15 @@ function handleLaunchMutate(req: LaunchMutateRequest): LaunchMutateResponse {
       userAgent,
     },
   };
+
+  fileLog("handle.launchMutate.response", {
+    argsCount: args.length,
+    extensionsCount: extensions.length,
+    initScriptsCount: initScripts.length,
+    userAgent: userAgent || "(none)",
+  });
+
+  return resp;
 }
 
 // ---------------------------------------------------------------------------
@@ -711,11 +832,15 @@ function dispatch(envelope: PluginEnvelope): PluginResponse {
   const isOfficial = envelope.protocol === "agent-browser.plugin.v1";
   const isLegacy = !envelope.protocol;
 
+  fileLog("dispatch.request", { type: envelope.type, protocol: envelope.protocol ?? "legacy" });
+
   if (!isOfficial && !isLegacy) {
-    return makeError(
+    const err = makeError(
       "unsupported_protocol",
       `Unsupported protocol: "${String(envelope.protocol)}". Expected "agent-browser.plugin.v1".`
     );
+    fileLog("dispatch.error", err.error);
+    return err;
   }
 
   switch (envelope.type) {
@@ -734,11 +859,14 @@ function dispatch(envelope: PluginEnvelope): PluginResponse {
       return handleLaunchMutate(req);
     }
 
-    default:
-      return makeError(
+    default: {
+      const err = makeError(
         "unsupported_type",
         `Unsupported request type: "${String(envelope.type)}". Supported types: plugin.manifest, launch.mutate.`
       );
+      fileLog("dispatch.error", err.error);
+      return err;
+    }
   }
 }
 
@@ -747,6 +875,7 @@ function dispatch(envelope: PluginEnvelope): PluginResponse {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
+  fileLog("plugin.start", { pid: process.pid, cwd: process.cwd() });
   let rawInput = "";
 
   process.stdin.setEncoding("utf8");

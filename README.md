@@ -15,10 +15,10 @@ A local `launch.mutate` plugin that appends stealth-related Chrome launch argume
 **This plugin only affects local agent-browser `launch`.** It does NOT modify:
 - Browsers started via `--cdp` (CDP connect mode)
 - Browsers started via `--auto-connect`
-- Browsers provided by a `browser.provider` plugin (e.g. cloud-browser, userprofile-browser)
+- Browsers provided by a `browser.provider` plugin (e.g. cloud-browser)
 
 If you need stealth args when using a `browser.provider`, pass them explicitly in the `browser.launch` request `args` field.
-For `agent-browser-plugin-userprofile-browser`, launch mode still needs a CDP endpoint and owns its remote debugging setup; this `launch.mutate` plugin cannot remove or rewrite provider core args after the provider has launched Chrome.
+`agent-browser-plugin-userprofile-browser` is also a `launch.mutate` plugin now, so it shares the local launch pipeline and can be used together with `--extension`.
 
 ### Build
 
@@ -153,8 +153,11 @@ The plugin injects one bundled, idempotent stealth script into every page. It co
 3. **Patch `window.chrome` shape** - adds `chrome.app`, `chrome.runtime`, `chrome.csi`, and `chrome.loadTimes` only when missing.
 4. **Patch empty navigator fields** - fills empty `languages`, missing `vendor`, low `hardwareConcurrency`, and empty `plugins`/`mimeTypes` fallbacks.
 5. **Patch browser APIs with common headless gaps** - media codec responses, notification permissions, WebGL SwiftShader values, missing outer dimensions, and `srcdoc` iframe `contentWindow`.
+6. **Patch stealth anti-debug probes** - replaces `console.table` with a native-looking no-op and shadows `performance.now` with a native-looking monotonic clock based on navigation start.
 
 The script is deliberately generic. It patches missing or clearly headless-shaped values, avoids site-specific behavior, and does not override already-populated `navigator.plugins`, `navigator.languages`, or real extension-provided objects.
+
+The `console.table` and `performance.now` hooks are intentionally small. They target JavaScript devtools timing checks that compare repeated `performance.now()` calls or use `console.table()` side effects to detect debugging. The `performance.now()` hook stores the last returned value and, when the current clock value is less than or equal to it, returns `last + 0.001` so tight same-millisecond calls cannot produce `t1 === t2`.
 
 ### userAgent Strategy
 
@@ -177,17 +180,27 @@ The script is deliberately generic. It patches missing or clearly headless-shape
 
 ## agent-browser-plugin-userprofile-browser
 
-A local `browser.provider` plugin that launches or connects to a Chrome browser using a real user profile, returning a CDP URL for agent-browser to consume.
+A local `launch.mutate` plugin that appends Chrome user profile launch arguments to agent-browser local launches.
 
 ### Purpose
 
-Use this plugin when you want agent-browser to work with a real Chrome profile (cookies, extensions, logged-in sessions) rather than a sandboxed headless browser.
+Use this plugin when you want agent-browser to reuse a real Chrome profile while staying on the local browser launch path. This matters for extension workflows because agent-browser rejects `--extension` when `--provider` is used.
 
 ### Usage
 
 ```bash
-agent-browser --provider agent-browser-plugin-userprofile-browser open https://example.com
+agent-browser --extension ./capsolver-extension --headed open chrome://extensions
 ```
+
+With explicit profile selection:
+
+```bash
+AGENT_BROWSER_USERPROFILE_DIR="$HOME/Library/Application Support/Google/Chrome" \
+AGENT_BROWSER_PROFILE_DIRECTORY="Default" \
+agent-browser --extension ./capsolver-extension --headed open https://example.com
+```
+
+Do not call this plugin with `--provider`. It is configured in `agent-browser.json` as a launch mutator and runs during local launches.
 
 ### Build
 
@@ -205,8 +218,6 @@ Produces `dist/index.js`. The plugin is configured in `agent-browser.json` to be
 | `AGENT_BROWSER_USERPROFILE_DIR` | Override the Chrome user data directory path |
 | `AGENT_BROWSER_USERPROFILE_NAME` | Alias for `AGENT_BROWSER_USERPROFILE_DIR` |
 | `AGENT_BROWSER_PROFILE_DIRECTORY` | Override the profile directory name (e.g. `Default`, `Profile 1`) |
-| `CHROME_PATH` | Path to Chrome/Chromium executable |
-| `AGENT_BROWSER_CDP_URL` | Provide a pre-existing CDP WebSocket URL to connect mode |
 
 ### Profile Selection Strategy
 
@@ -215,13 +226,18 @@ Produces `dist/index.js`. The plugin is configured in `agent-browser.json` to be
    - Linux: `${XDG_CONFIG_HOME:-~/.config}/google-chrome` (falls back to `chromium`)
 2. `request.profileDirectory` → `AGENT_BROWSER_PROFILE_DIRECTORY` → `Default`
 
-### Chrome Executable Detection
+The `request.*` fields are useful for direct protocol tests. In normal agent-browser CLI use, set the environment variables above.
 
-Priority order:
-1. `request.executablePath`
-2. `CHROME_PATH` environment variable
-3. macOS: `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`
-4. Linux: `google-chrome`, `google-chrome-stable`, `chromium`, `chromium-browser` (via `which`)
+### Launch Args Strategy
+
+The plugin preserves caller-provided launch args, extensions, initScripts, and userAgent, then appends missing profile args:
+
+- `--user-data-dir=<resolved user data dir>`
+- `--profile-directory=<profile directory>`
+- `--no-first-run`
+- `--no-default-browser-check`
+
+If the incoming launch already includes one of those flags, the explicit caller-provided value is preserved.
 
 ### Protocol Examples
 
@@ -244,76 +260,25 @@ Response:
   "success": true,
   "manifest": {
     "name": "agent-browser-plugin-userprofile-browser",
-    "capabilities": ["browser.provider"],
-    "description": "Launch or connect Chrome with a selected user profile for agent-browser."
+    "capabilities": ["launch.mutate"],
+    "description": "Append Chrome user profile launch args so local agent-browser launches can reuse a selected profile."
   }
 }
 ```
 
-#### `browser.launch`
+#### `launch.mutate`
 
 Request:
 ```json
 {
   "protocol": "agent-browser.plugin.v1",
-  "type": "browser.launch",
-  "capability": "browser.provider",
+  "type": "launch.mutate",
+  "capability": "launch.mutate",
   "request": {
-    "profileDirectory": "Default"
-  }
-}
-```
-
-Response (launch mode):
-```json
-{
-  "protocol": "agent-browser.plugin.v1",
-  "success": true,
-  "browser": {
-    "cdpUrl": "ws://127.0.0.1:9222/devtools/browser/session",
-    "directPage": false,
-    "metadata": {
-      "userDataDir": "/Users/example/Library/Application Support/Google/Chrome",
-      "profileDirectory": "Default",
-      "mode": "launch",
-      "sessionId": "userprofile-launch-12345-1700000000000",
-      "port": 9222
-    },
-    "cleanup": {
-      "sessionId": "userprofile-launch-12345-1700000000000"
-    }
-  }
-}
-```
-
-Response (connect mode — when `cdpUrl` is provided in request or env):
-```json
-{
-  "protocol": "agent-browser.plugin.v1",
-  "success": true,
-  "browser": {
-    "cdpUrl": "ws://127.0.0.1:9222/devtools/browser/existing-session",
-    "directPage": false,
-    "metadata": {
-      "userDataDir": "/Users/example/Library/Application Support/Google/Chrome",
-      "profileDirectory": "Default",
-      "mode": "connect",
-      "sessionId": "userprofile-connect-1700000000000"
-    }
-  }
-}
-```
-
-#### `browser.close`
-
-Request:
-```json
-{
-  "protocol": "agent-browser.plugin.v1",
-  "type": "browser.close",
-  "capability": "browser.provider",
-  "request": {
-    "sessionId": "userprofile-launch-12345-1700000000000"
+    "args": [],
+    "extensions": ["/absolute/path/to/extension"],
+    "initScripts": [],
+    "userAgent": ""
   }
 }
 ```
@@ -323,34 +288,24 @@ Response:
 {
   "protocol": "agent-browser.plugin.v1",
   "success": true,
-  "data": {
-    "closed": true
+  "launch": {
+    "args": [
+      "--user-data-dir=/Users/example/Library/Application Support/Google/Chrome",
+      "--profile-directory=Default",
+      "--no-first-run",
+      "--no-default-browser-check"
+    ],
+    "extensions": ["/absolute/path/to/extension"],
+    "initScripts": [],
+    "userAgent": ""
   }
 }
 ```
 
 ### Profile Lock Risk
 
-Chrome locks its user data directory with a `SingletonLock` (Linux) or similar platform file while running. If the profile is already locked:
-
-- The plugin will attempt to connect to an existing remote debugging Chrome on ports 9222–9225.
-- If none is found, it returns a `profile_locked` error — **it never deletes the lock file**.
-- To avoid this, either close Chrome first or use `cdpUrl`/`port` to connect to an already-debugging instance.
-
-### Cleanup Behavior
-
-- **Launch mode**: `browser.close` sends `SIGTERM` to the Chrome process started by this plugin.
-- **Connect mode**: `browser.close` is a no-op — it does not close the user's existing Chrome.
-- Repeated `browser.close` calls are idempotent (return `{ closed: false, noOp: true }`).
-
-### `user-data-dir` / `profile-directory` vs `browser.cdpUrl`
-
-The official `browser.provider` contract requires `browser.cdpUrl` in the response — agent-browser uses this WebSocket URL to connect via CDP. The `user-data-dir` and `profile-directory` values are informational metadata stored in `browser.metadata` (not top-level browser fields), used for tracing and debugging.
-
-### `launch.mutate` and stealth
-
-The independent `stealth` (`launch.mutate`) plugin does **not** automatically modify a browser that was already launched or connected by this provider. If you need stealth args applied to a user-profile Chrome, pass those args via `request.args` in the `browser.launch` request instead of relying on a separate mutate plugin.
+Chrome locks its user data directory while it is running. This plugin only mutates launch args; it does not inspect, delete, or repair Chrome lock files. If Chrome refuses to start with a selected profile, close the existing Chrome process for that profile or choose a different user data directory.
 
 ### Security Notice
 
-This plugin accesses real Chrome user profiles which contain cookies, login sessions, and other sensitive data. Logs are written only to stderr and never include cookie values, tokens, or profile file contents.
+This plugin points Chrome at real user profiles, which can contain cookies, login sessions, and other sensitive data. It never reads profile contents. Logs must not include cookies, tokens, or local profile file contents.
