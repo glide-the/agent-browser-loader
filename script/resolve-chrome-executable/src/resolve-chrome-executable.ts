@@ -23,7 +23,7 @@ function resolveChromeExecutable(explicit?: string): string {
       "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
       "/Applications/Chromium.app/Contents/MacOS/Chromium"
     );
-  } else if (plat !== "win32") {
+  } else if (plat === "linux") {
     for (const name of ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]) {
       try {
         const found = execFileSync("which", [name], {
@@ -31,6 +31,39 @@ function resolveChromeExecutable(explicit?: string): string {
         })
           .toString()
           .trim();
+        if (found) {
+          candidates.push(found);
+        }
+      } catch {
+        // not on PATH; try next
+      }
+    }
+  } else if (plat === "win32") {
+    const localAppData = process.env["LOCALAPPDATA"];
+    if (localAppData) {
+      candidates.push(
+        `${localAppData}\\Google\\Chrome\\Application\\chrome.exe`,
+        `${localAppData}\\Chromium\\Application\\chrome.exe`
+      );
+    }
+    candidates.push(
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+      "C:\\Program Files\\Chromium\\Application\\chrome.exe",
+      "C:\\Program Files (x86)\\Chromium\\Application\\chrome.exe"
+    );
+
+    for (const name of ["chrome.exe", "chromium.exe", "chrome", "chromium"]) {
+      try {
+        const foundRaw = execFileSync("where", [name], {
+          stdio: ["ignore", "pipe", "ignore"],
+        })
+          .toString()
+          .trim();
+        const found = foundRaw
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .find((line) => line.length > 0);
         if (found) {
           candidates.push(found);
         }

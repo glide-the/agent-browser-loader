@@ -2,13 +2,13 @@
   "name": "agent-browser-script-resolve-chrome-executable",
   "version": "0.1.0",
   "type": "module",
-  "main": "dist/index.js",
+  "main": "dist/resolve-chrome-executable.js",
   "bin": {
-    "agent-browser-resolve-chrome-executable": "./dist/index.js"
+    "agent-browser-resolve-chrome-executable": "./dist/resolve-chrome-executable.js"
   },
   "scripts": {
     "build": "bun run build.ts",
-    "chrome:path": "bun run build && node ./dist/index.js"
+    "chrome:path": "bun run build && node ./dist/resolve-chrome-executable.js"
   },
   "engines": {
     "node": ">=18"
