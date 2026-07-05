@@ -1,16 +1,6 @@
 {
   "plugins": [
    
-    {
-      "name": "stealth-1",
-      "command": "node",
-      "args": ["./plugins/agent-browser-plugin-stealth/dist/index.js"],
-      "capabilities": ["launch.mutate"]    },
-    {
-      "name": "userprofile-browser",
-      "command": "node",
-      "args": ["./plugins/agent-browser-plugin-userprofile-browser/dist/index.js"],
-      "capabilities": ["browser.provider"]
-    }
+    
   ]
 }

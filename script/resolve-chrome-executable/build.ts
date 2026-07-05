@@ -1,5 +1,5 @@
 import { build } from "bun";
-import { writeFileSync, readFileSync, chmodSync } from "fs";
+import { chmodSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 
 const result = await build({
