@@ -1,0 +1,15 @@
+{
+  "name": "google",
+  "patches": {
+    "webdriver": false,
+    "consoleTable": false,
+    "performanceNow": false,
+    "chromeRuntime": false,
+    "headlessUA": true,
+    "plugins": false,
+    "webgl": false,
+    "iframe": false,
+    "permissions": false,
+    "functionToString": false
+  }
+}

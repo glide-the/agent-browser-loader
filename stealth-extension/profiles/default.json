@@ -1,0 +1,15 @@
+{
+  "name": "default",
+  "patches": {
+    "webdriver": false,
+    "consoleTable": false,
+    "performanceNow": false,
+    "chromeRuntime": false,
+    "headlessUA": false,
+    "plugins": false,
+    "webgl": false,
+    "iframe": false,
+    "permissions": false,
+    "functionToString": false
+  }
+}

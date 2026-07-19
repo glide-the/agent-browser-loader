@@ -8,7 +8,7 @@ This workspace contains local plugins for [agent-browser](https://github.com/age
 
 ## agent-browser-plugin-stealth
 
-A local `launch.mutate` plugin that appends stealth-related Chrome launch arguments, extensions, initScripts, and a custom userAgent to agent-browser local launches. It also injects Chrome user-profile args (`--user-data-dir` / `--profile-directory`) read from the state file written by `agent-browser-plugin-userprofile-browser`, so a logged-in profile can be reused on the local launch path while still loading extensions.
+A local `launch.mutate` plugin that appends stealth-related Chrome launch arguments, the profile-driven stealth extension, caller-provided initScripts, and a custom userAgent to agent-browser local launches. It also injects Chrome user-profile args (`--user-data-dir` / `--profile-directory`) read from the state file written by `agent-browser-plugin-userprofile-browser`, so a logged-in profile can be reused on the local launch path while still loading extensions.
 
 > The heavy one-time profile rsync + Chrome launch lives in the `agent-browser-plugin-userprofile-browser` `browser.provider` plugin (see below). This `launch.mutate` plugin only reads the persisted launch directory on the local-launch path, so it never blocks startup with a sync.
 
@@ -131,10 +131,8 @@ Response:
   "success": true,
   "launch": {
     "args": ["--disable-blink-features=AutomationControlled"],
-    "extensions": [],
-    "initScripts": [
-      "(function() { try { Object.defineProperty(navigator, 'webdriver', { get: function() { return undefined; }, configurable: true }); } catch(e) {} })();"
-    ],
+    "extensions": ["/path/to/workspace/stealth-extension"],
+    "initScripts": [],
     "userAgent": ""
   }
 }
@@ -166,20 +164,19 @@ NDJSON/id error:
 {"id":"req-1","error":{"code":"parse_error","message":"JSON parse error: ..."}}
 ```
 
-### initScripts
+### Stealth Profiles
 
-The plugin injects one bundled, idempotent stealth script into every page. It covers the generic evasion categories that fit this plugin's initScript-only surface:
+The launch plugin loads `stealth-extension` by default and does not inject the legacy monolithic stealth initScript. Explicit `request.initScripts` values are still preserved. The extension reads JSON profiles in its MV3 service worker and registers only the selected patch files at `document_start` in the page's `MAIN` world.
 
-1. **Hide `navigator.webdriver`** - deletes or overrides the prototype getter when automation exposes it.
-2. **Clean obvious headless UA leaks** - replaces `HeadlessChrome/` with `Chrome/` if no higher-level UA override already handled it.
-3. **Patch `window.chrome` shape** - adds `chrome.app`, `chrome.runtime`, `chrome.csi`, and `chrome.loadTimes` only when missing.
-4. **Patch empty navigator fields** - fills empty `languages`, missing `vendor`, low `hardwareConcurrency`, and empty `plugins`/`mimeTypes` fallbacks.
-5. **Patch browser APIs with common headless gaps** - media codec responses, notification permissions, WebGL SwiftShader values, missing outer dimensions, and `srcdoc` iframe `contentWindow`.
-6. **Patch stealth anti-debug probes** - replaces `console.table` with a native-looking no-op and shadows `performance.now` with a native-looking monotonic clock based on navigation start.
+| Profile | Domains | Enabled patches |
+|---|---|---|
+| `boss` | `zhipin.com` and subdomains | webdriver, console.table, performance.now, chrome.runtime, headless UA cleanup, empty-only plugins fallback |
+| `google` | `google.com` and subdomains | headless UA cleanup only |
+| `default` | All remaining HTTP(S) pages | none |
 
-The script is deliberately generic. It patches missing or clearly headless-shaped values, avoids site-specific behavior, and does not override already-populated `navigator.plugins`, `navigator.languages`, or real extension-provided objects.
+WebGL, iframe `contentWindow`, permissions, and global `Function.prototype.toString` implementations remain available under `stealth-extension/patches/`, but all current profiles leave them disabled. The plugins patch never replaces a populated native `navigator.plugins` list.
 
-The `console.table` and `performance.now` hooks are intentionally small. They target JavaScript devtools timing checks that compare repeated `performance.now()` calls or use `console.table()` side effects to detect debugging. The `performance.now()` hook stores the last returned value and, when the current clock value is less than or equal to it, returns `last + 0.001` so tight same-millisecond calls cannot produce `t1 === t2`.
+Profile files are `stealth-extension/profiles/*.json`. After changing a profile, reload the unpacked extension (or restart Chrome) so the service worker re-registers its persistent content scripts.
 
 ### userAgent Strategy
 

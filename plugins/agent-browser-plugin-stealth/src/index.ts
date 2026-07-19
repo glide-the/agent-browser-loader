@@ -414,6 +414,13 @@ function appendProfileArgs(existingArgs: string[], profile: ProfileConfig): stri
 function getExtensions(existingExtensions: string[] = []): string[] {
   const extensions: string[] = [...existingExtensions];
 
+  const profileExtension = resolve(process.cwd(), "stealth-extension");
+  if (existsSync(join(profileExtension, "manifest.json"))) {
+    extensions.push(profileExtension);
+  } else {
+    stderr(`WARNING: profile extension not found at ${profileExtension}`);
+  }
+
   // Single extension path
   const singleExt = process.env["AGENT_BROWSER_STEALTH_EXTENSION"];
   if (singleExt) {
@@ -456,12 +463,12 @@ function getExtensions(existingExtensions: string[] = []): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// initScripts - generic stealth scripts adapted to this plugin's initScript
-// surface. These are intentionally broad browser-shape fixes, not site-specific
-// bypass logic.
+// Legacy all-site initScript retained for rollback/reference. Profile-based
+// injection now lives in stealth-extension and this script is not returned by
+// launch.mutate.
 // ---------------------------------------------------------------------------
 
-const INIT_SCRIPTS: string[] = [
+const LEGACY_INIT_SCRIPTS: string[] = [
   `(function() {
   try {
     var navProto = Object.getPrototypeOf(navigator);
@@ -967,7 +974,7 @@ function handleLaunchMutate(req: LaunchMutateRequest): LaunchMutateResponse {
   const stealthArgs = getStealthArgs(existingArgs);
   const args = appendProfileArgs(stealthArgs, profile);
   const extensions = getExtensions(req.extensions ?? []);
-  const initScripts = Array.from(new Set([...(req.initScripts ?? []), ...INIT_SCRIPTS]));
+  const initScripts = Array.from(new Set(req.initScripts ?? []));
   const userAgent = getUserAgent(req.userAgent);
 
   const resp: LaunchMutateResponse = {
