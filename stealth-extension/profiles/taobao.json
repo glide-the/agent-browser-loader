@@ -1,0 +1,15 @@
+{
+  "name": "boss",
+  "patches": {
+    "webdriver": true,
+    "consoleTable": true,
+    "performanceNow": true,
+    "chromeRuntime": true,
+    "headlessUA": true,
+    "plugins": true,
+    "webgl": false,
+    "iframe": false,
+    "permissions": false,
+    "functionToString": false
+  }
+}

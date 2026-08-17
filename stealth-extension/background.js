@@ -4,6 +4,10 @@ const PROFILE_DEFINITIONS = [
     matches: ["*://zhipin.com/*", "*://*.zhipin.com/*"]
   },
   {
+    name: "taobao",
+    matches: ["*://taobao.com/*", "*://*.taobao.com/*"]
+  },
+  {
     name: "google",
     matches: ["*://google.com/*", "*://*.google.com/*"]
   },
