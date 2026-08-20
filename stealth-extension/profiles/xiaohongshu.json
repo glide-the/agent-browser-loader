@@ -1,5 +1,5 @@
 {
-  "name": "taobao",
+  "name": "xiaohongshu",
   "patches": {
     "webdriver": true,
     "consoleTable": true,

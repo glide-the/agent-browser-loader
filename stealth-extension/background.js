@@ -8,6 +8,10 @@ const PROFILE_DEFINITIONS = [
     matches: ["*://taobao.com/*", "*://*.taobao.com/*"]
   },
   {
+    name: "xiaohongshu",
+    matches: ["*://xiaohongshu.com/*", "*://*.xiaohongshu.com/*"]
+  },
+  {
     name: "google",
     matches: ["*://google.com/*", "*://*.google.com/*"]
   },
@@ -18,7 +22,11 @@ const PROFILE_DEFINITIONS = [
       "*://zhipin.com/*",
       "*://*.zhipin.com/*",
       "*://google.com/*",
-      "*://*.google.com/*"
+      "*://*.google.com/*",
+      "*://xiaohongshu.com/*",
+      "*://*.xiaohongshu.com/*",
+      "*://taobao.com/*",
+      "*://*.taobao.com/*"
     ]
   }
 ];
